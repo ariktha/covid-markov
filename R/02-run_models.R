@@ -108,3 +108,128 @@ saveRDS(fitted_base_models, here("data", "temp", "models.rds"))
 saveRDS(tidied_base_results, here("data", "temp", "mod_rates_tidy.rds"))
 saveRDS(tidied_base_pmats, here("data", "temp", "mod_pmats_tidy.rds"))
 
+
+# Covariate models --------------------------------------------------------
+
+time_invariant_covariates <- c("age", "sex", "race", "ethnicity", "language", 
+                               "insurance_type", "smoking", "BMI", "bmi_cat", 
+                               "COVID_vax", "cci_score", "chf", "cci_cat", 
+                               "copd", "dnr_on_admit")
+
+continuous_covariates <- c("age", "BMI", "cci_score")
+
+# Add transition trend categories
+trend_types <- add_transition_trends(pt_stg_raw)
+
+pt_stg_enhanced <- pt_stg %>%
+  left_join(dem_raw, by = "deid_enc_id") %>%
+  arrange(deid_enc_id, date) %>%
+  group_by(deid_enc_id) %>%
+  mutate(
+    from_state = state,
+    to_state = lead(state)
+  ) %>%
+  ungroup() %>%
+  left_join(trend_types, by = c("from_state" = "from", "to_state" = "to"))
+
+
+## Univariate models ------------------------------------------------------
+
+# Fit univariate models with spline testing for continuous variables
+covariate_models <- fit_covariate_models(
+  patient_data = pt_stg_enhanced,
+  crude_rates = crude_rates,
+  covariates = time_invariant_covariates,
+  continuous_vars = continuous_covariates,
+  spline_df = 3
+)
+
+# Extract model statistics
+covariate_stats <- extract_covariate_stats(covariate_models, fitted_base_models)
+
+# Save results
+saveRDS(covariate_models, here("data", "temp", "covariate_models.rds"))
+saveRDS(covariate_stats, here("data", "temp", "covariate_stats.rds"))
+
+## Transition-specific covariate effects -----------------------------------
+
+# Select key covariates for transition-specific analysis
+key_covariates <- c("age", "cci_cat")
+
+transition_specific_models <- fit_transition_specific_models(
+  patient_data = pt_stg_enhanced,
+  crude_rates = crude_rates,
+  covariates = key_covariates
+)
+
+# Extract statistics for transition-specific models
+transition_stats <- extract_covariate_stats(transition_specific_models, fitted_base_models)
+
+# Save results
+saveRDS(transition_specific_models, here("data", "temp", "transition_specific_models.rds"))
+saveRDS(transition_stats, here("data", "temp", "transition_stats.rds"))
+
+## Multivariable model with forward selection -----------------------------
+
+model_data <- pt_stg %>% filter(model == best_base_model)
+
+multivariate_models <- multivariate_selection(
+  patient_data = model_data,
+  crude_rates = setNames(list(crude_rates[[best_base_model]]), best_base_model),
+  covariates = time_invariant_covariates,
+  method = "forward",
+  alpha_enter = 0.05
+)
+
+if (!is.null(multivariate_models[[best_base_model]])) {
+  selected_vars <- multivariate_models[[best_base_model]]$selected_covariates
+  cat("Selected variables:", paste(selected_vars, collapse = ", "), "\n")
+  cat("Final AIC:", round(multivariate_models[[best_base_model]]$final_aic, 1), "\n\n")
+}
+
+# Save multivariate model results
+
+saveRDS(multivariate_models, here("data", "temp", "multivariate_models.rds"))
+
+# Time-varying models -----------------------------------------------------
+
+# Fit models with time-dependent transition rates
+time_varying_models <- fit_time_varying_models(
+  patient_data = pt_stg_enhanced,
+  crude_rates = crude_rates,
+  time_covariates = c("linear", "spline", "piecewise")
+)
+
+# Compare time-varying models to base models
+time_varying_stats <- extract_covariate_stats(time_varying_models, fitted_base_models)
+
+# Save results
+saveRDS(time_varying_models, here("data", "temp", "time_varying_models.rds"))
+saveRDS(time_varying_stats, here("data", "temp", "time_varying_stats.rds"))
+
+# Save all ----------------------------------------------------------------
+
+# Create a comprehensive summary
+all_models <- list(
+  base_models = fitted_base_models,
+  covariate_models = covariate_models,
+  time_varying_models = time_varying_models,
+  transition_specific_models = transition_specific_models,
+  sensitivity_results = sensitivity_results,
+  model_statistics = list(
+    covariate_stats = covariate_stats,
+    time_varying_stats = time_varying_stats,
+    transition_stats = transition_stats
+  ),
+  data_info = list(
+    n_patients = length(unique(pt_stg_enhanced$deid_enc_id)),
+    n_observations = nrow(pt_stg_enhanced),
+    covariates_tested = time_invariant_covariates,
+    continuous_covariates = continuous_covariates,
+    long_stay_patients = length(sensitivity_results$long_stay_patients)
+  )
+)
+
+# Save comprehensive summary
+saveRDS(all_models, here("data", "temp", "all_models.rds"))
+

@@ -25,8 +25,8 @@ crude_rates <- readRDS(here("data", "temp", "mod_crude_rates.rds"))
 # Define covariate lists
 time_invariant_covariates <- c("age", "sex", "race", "ethnicity", "language", 
                                "insurance_type", "smoking", "BMI", "bmi_cat", 
-                               "COVID_vax_doses", "COVID_vax", "cci_score", 
-                               "cci_fct", "chf", "cci_cat", "copd", "dnr_on_admit")
+                               "COVID_vax", "cci_score", 
+                                "chf", "cci_cat", "copd", "dnr_on_admit")
 
 continuous_covariates <- c("age", "BMI", "cci_score")
 

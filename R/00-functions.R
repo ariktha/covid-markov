@@ -106,7 +106,7 @@ tidy_msm_models <- function(fitted_msm_models) {
   return(tidied_models)
 }
 
-tidy_msm_pmats <- function(fitted_msm_models) {
+tidy_msm_pmats <- function(fitted_msm_models, ) {
   tidied_pmats <- data.frame()
   for (modelname in names(fitted_msm_models)) {
     fitted_model <- fitted_msm_models[[modelname]]
@@ -276,164 +276,6 @@ tidy_msm_hr_univ <- function(fitted_msm_models, hr_scale = 1) {
   return(tidied_pmats)
 }
 
-
-# Model comparison functions ----------------------------------------------
-
-#' Compare models with same structure (nested in covariates only)
-#' @param fitted_models List of fitted msm models
-#' @param model_names Vector of model names to compare
-#' @param reference_model Name of reference model (default: first model)
-#' @return Data frame with comparison metrics
-compare_same_structure_models <- function(fitted_models, model_names = NULL, reference_model = NULL) {
-  if (is.null(model_names)) model_names <- names(fitted_models)
-  if (is.null(reference_model)) reference_model <- model_names[1]
-  
-  # Extract model statistics
-  model_stats <- map_dfr(model_names, function(name) {
-    mod <- fitted_models[[name]]
-    if (is.null(mod)) {
-      return(data.frame(
-        model = name,
-        converged = FALSE,
-        loglik = NA,
-        AIC = NA,
-        BIC = NA,
-        n_params = NA,
-        n_obs = NA
-      ))
-    }
-    
-    data.frame(
-      model = name,
-      converged = mod$opt$convergence == 0,
-      loglik = as.numeric(logLik(mod)),
-      AIC = AIC(mod),
-      BIC = BIC(mod),
-      n_params = length(mod$estimates),
-      n_obs = nrow(mod$data$mf)
-    )
-  })
-  
-  # Calculate differences from reference
-  ref_stats <- model_stats[model_stats$model == reference_model, ]
-  model_stats <- model_stats %>%
-    mutate(
-      delta_AIC = AIC - ref_stats$AIC,
-      delta_BIC = BIC - ref_stats$BIC,
-      delta_loglik = loglik - ref_stats$loglik
-    )
-  
-  # Perform LR tests for nested models
-  lrt_results <- map_dfr(model_names[model_names != reference_model], function(name) {
-    mod1 <- fitted_models[[reference_model]]
-    mod2 <- fitted_models[[name]]
-    
-    if (is.null(mod1) || is.null(mod2) || !mod1$opt$convergence == 0 || !mod2$opt$convergence == 0) {
-      return(data.frame(
-        model = name,
-        lrt_stat = NA,
-        lrt_df = NA,
-        lrt_pval = NA
-      ))
-    }
-    
-    lrt <- tryCatch({
-      lrtest.msm(mod1, mod2)
-    }, error = function(e) {
-      warning(paste("LR test failed for", name, ":", e$message))
-      return(c(NA, NA, NA))
-    })
-    
-    data.frame(
-      model = name,
-      lrt_stat = lrt[1],
-      lrt_df = lrt[2],
-      lrt_pval = lrt[3]
-    )
-  })
-  
-  # Merge results
-  final_results <- model_stats %>%
-    left_join(lrt_results, by = "model") %>%
-    arrange(AIC)
-  
-  return(final_results)
-}
-
-#' Compare models with different state structures
-#' @param fitted_models List of fitted msm models
-#' @param model_pairs Data frame with columns model1, model2 for pairwise comparisons
-#' @param cores Number of cores for parallel computation
-#' @return Data frame with comparison metrics
-compare_different_structure_models <- function(fitted_models, model_pairs, cores = n.cores) {
-  
-  safe_draic <- safely(draic.msm)
-  safe_drlcv <- safely(drlcv.msm)
-  
-  comparison_results <- model_pairs %>%
-    mutate(
-      draic_result = map2(model1, model2, function(m1, m2) {
-        mod1 <- fitted_models[[m1]]
-        mod2 <- fitted_models[[m2]]
-        
-        if (is.null(mod1) || is.null(mod2)) return(NULL)
-        
-        result <- safe_draic(mod1, mod2)
-        if (!is.null(result$result)) {
-          return(list(
-            draic = result$result$draic,
-            draic_se = result$result$se,
-            draic_ll = result$result$ti["2.5%"],
-            draic_ul = result$result$ti["97.5%"],
-            draic_pval = result$result$ti["Prob<0"]
-          ))
-        } else {
-          warning(paste("DRAIC failed for", m1, "vs", m2, ":", result$error$message))
-          return(NULL)
-        }
-      }),
-      
-      drlcv_result = map2(model1, model2, function(m1, m2) {
-        mod1 <- fitted_models[[m1]]
-        mod2 <- fitted_models[[m2]]
-        
-        if (is.null(mod1) || is.null(mod2)) return(NULL)
-        
-        result <- safe_drlcv(mod1, mod2, cores = cores)
-        if (!is.null(result$result)) {
-          return(list(
-            drlcv = result$result$drlcv,
-            drlcv_se = result$result$se,
-            drlcv_ll = result$result$ti["2.5%"],
-            drlcv_ul = result$result$ti["97.5%"],
-            drlcv_pval = result$result$ti["Prob<0"]
-          ))
-        } else {
-          warning(paste("DRLCV failed for", m1, "vs", m2, ":", result$error$message))
-          return(NULL)
-        }
-      })
-    )
-  
-  # Extract results
-  final_results <- comparison_results %>%
-    mutate(
-      draic = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic)),
-      draic_ll = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic_ll)),
-      draic_ul = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic_ul)),
-      draic_pval = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic_pval)),
-      
-      drlcv = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv)),
-      drlcv_ll = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv_ll)),
-      drlcv_ul = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv_ul)),
-      drlcv_pval = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv_pval))
-    ) %>%
-    dplyr::select(-draic_result, -drlcv_result)
-  
-  return(final_results)
-}
-
-
 # Covariate functions -----------------------------------------------------
 
 #' Fit univariate models with spline testing for continuous variables
@@ -596,6 +438,372 @@ fit_transition_specific_models <- function(patient_data, crude_rates, covariates
 }
 
 
+# ADVANCED COVARIATE TESTING FUNCTIONS-----
+
+#' Test for non-linear relationships using restricted cubic splines
+#' @param patient_data Patient data
+#' @param crude_rates List of crude rates
+#' @param covariate Name of continuous covariate
+#' @param knots Number of knots for spline (default: 4)
+#' @return List with linear and spline models plus comparison
+test_nonlinear_relationship <- function(patient_data, crude_rates, covariate, knots = 4) {
+  
+  # Fit linear model
+  linear_models <- fit_msm_models(patient_data, crude_rates, covariates = c(covariate))
+  
+  # Create restricted cubic spline basis
+  spline_data <- patient_data %>%
+    group_by(model) %>%
+    nest() %>%
+    mutate(
+      data = map(data, function(df) {
+        if (!all(is.na(df[[covariate]]))) {
+          # Use rcs from Hmisc or create manual spline
+          spline_vars <- paste0(covariate, "_rcs", seq_len(knots - 1))
+          spline_matrix <- ns(df[[covariate]], df = knots - 1)
+          colnames(spline_matrix) <- spline_vars
+          bind_cols(df, as.data.frame(spline_matrix))
+        } else {
+          df
+        }
+      })
+    ) %>%
+    unnest(data)
+  
+  spline_vars <- paste0(covariate, "_rcs", seq_len(knots - 1))
+  spline_models <- fit_msm_models(spline_data, crude_rates, covariates = spline_vars)
+  
+  # Compare models
+  comparison_results <- map_dfr(names(linear_models), function(model_name) {
+    linear_mod <- linear_models[[model_name]]
+    spline_mod <- spline_models[[model_name]]
+    
+    if (is.null(linear_mod) || is.null(spline_mod)) {
+      return(data.frame(
+        model = model_name,
+        linear_AIC = NA,
+        spline_AIC = NA,
+        delta_AIC = NA,
+        lrt_stat = NA,
+        lrt_df = knots - 2,
+        lrt_pval = NA,
+        prefer_spline = NA
+      ))
+    }
+    
+    linear_aic <- AIC(linear_mod)
+    spline_aic <- AIC(spline_mod)
+    delta_aic <- spline_aic - linear_aic
+    
+    # Likelihood ratio test
+    lrt_result <- tryCatch({
+      lrtest.msm(linear_mod, spline_mod)
+    }, error = function(e) c(NA, NA, NA))
+    
+    data.frame(
+      model = model_name,
+      linear_AIC = linear_aic,
+      spline_AIC = spline_aic,
+      delta_AIC = delta_aic,
+      lrt_stat = lrt_result[1],
+      lrt_df = lrt_result[2],
+      lrt_pval = lrt_result[3],
+      prefer_spline = delta_aic < -2 && lrt_result[3] < 0.05
+    )
+  })
+  
+  return(list(
+    linear_models = linear_models,
+    spline_models = spline_models,
+    comparison = comparison_results,
+    covariate = covariate,
+    knots = knots
+  ))
+}
+
+#' Fit multivariate models with forward/backward selection
+#' @param patient_data Patient data
+#' @param crude_rates List of crude rates
+#' @param covariates Vector of candidate covariates
+#' @param method Selection method ("forward", "backward", "stepwise")
+#' @param alpha_enter P-value threshold for entering (default: 0.05)
+#' @param alpha_remove P-value threshold for removal (default: 0.10)
+#' @return List of selected models
+multivariate_selection <- function(patient_data, crude_rates, covariates, 
+                                   method = "forward", alpha_enter = 0.05, alpha_remove = 0.10) {
+  
+  selected_models <- list()
+  
+  for (model_name in names(crude_rates)) {
+    cat("Running", method, "selection for", model_name, "\n")
+    
+    model_data <- patient_data %>% filter(model == model_name)
+    if (nrow(model_data) == 0) next
+    
+    if (method == "forward") {
+      selected_models[[model_name]] <- forward_selection(
+        model_data, crude_rates[[model_name]], covariates, alpha_enter
+      )
+    } else if (method == "backward") {
+      selected_models[[model_name]] <- backward_elimination(
+        model_data, crude_rates[[model_name]], covariates, alpha_remove
+      )
+    } else if (method == "stepwise") {
+      selected_models[[model_name]] <- stepwise_selection(
+        model_data, crude_rates[[model_name]], covariates, alpha_enter, alpha_remove
+      )
+    }
+  }
+  
+  return(selected_models)
+}
+
+#' Forward selection helper
+forward_selection <- function(model_data, crude_rate, covariates, alpha_enter) {
+  selected_covariates <- character(0)
+  remaining_covariates <- covariates
+  current_aic <- Inf
+  
+  # Start with base model
+  base_model <- tryCatch({
+    msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, 
+        qmatrix = crude_rate$qmat, control = list(fnscale = 10000, maxit = 1000))
+  }, error = function(e) NULL)
+  
+  if (!is.null(base_model)) {
+    current_aic <- AIC(base_model)
+  }
+  
+  while (length(remaining_covariates) > 0) {
+    best_covariate <- NULL
+    best_pvalue <- 1
+    best_aic <- current_aic
+    
+    for (cov in remaining_covariates) {
+      test_covariates <- c(selected_covariates, cov)
+      test_formula <- paste("~", paste(test_covariates, collapse = " + "))
+      
+      test_model <- tryCatch({
+        msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, 
+            qmatrix = crude_rate$qmat, covariates = as.formula(test_formula),
+            control = list(fnscale = 10000, maxit = 1000))
+      }, error = function(e) NULL)
+      
+      if (!is.null(test_model) && test_model$opt$convergence == 0) {
+        test_aic <- AIC(test_model)
+        
+        # Compare to current model
+        if (length(selected_covariates) == 0) {
+          comparison_model <- base_model
+        } else {
+          current_formula <- paste("~", paste(selected_covariates, collapse = " + "))
+          comparison_model <- tryCatch({
+            msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, 
+                qmatrix = crude_rate$qmat, covariates = as.formula(current_formula),
+                control = list(fnscale = 10000, maxit = 1000))
+          }, error = function(e) NULL)
+        }
+        
+        if (!is.null(comparison_model)) {
+          lrt_result <- tryCatch({
+            lrtest.msm(comparison_model, test_model)
+          }, error = function(e) c(NA, NA, 1))
+          
+          if (!is.na(lrt_result[3]) && lrt_result[3] < best_pvalue && test_aic < best_aic) {
+            best_covariate <- cov
+            best_pvalue <- lrt_result[3]
+            best_aic <- test_aic
+          }
+        }
+      }
+    }
+    
+    if (!is.null(best_covariate) && best_pvalue < alpha_enter) {
+      selected_covariates <- c(selected_covariates, best_covariate)
+      remaining_covariates <- setdiff(remaining_covariates, best_covariate)
+      current_aic <- best_aic
+      cat("Added:", best_covariate, "(p =", round(best_pvalue, 4), ")\n")
+    } else {
+      break
+    }
+  }
+  
+  # Fit final model
+  if (length(selected_covariates) > 0) {
+    final_formula <- paste("~", paste(selected_covariates, collapse = " + "))
+    final_model <- tryCatch({
+      msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, 
+          qmatrix = crude_rate$qmat, covariates = as.formula(final_formula),
+          control = list(fnscale = 10000, maxit = 1000))
+    }, error = function(e) NULL)
+  } else {
+    final_model <- base_model
+  }
+  
+  return(list(
+    model = final_model,
+    selected_covariates = selected_covariates,
+    final_aic = current_aic
+  ))
+}
+
+# Model comparison functions ----------------------------------------------
+
+#' Compare models with same structure (nested in covariates only)
+#' @param fitted_models List of fitted msm models
+#' @param model_names Vector of model names to compare
+#' @param reference_model Name of reference model (default: first model)
+#' @return Data frame with comparison metrics
+compare_same_structure_models <- function(fitted_models, model_names = NULL, reference_model = NULL) {
+  if (is.null(model_names)) model_names <- names(fitted_models)
+  if (is.null(reference_model)) reference_model <- model_names[1]
+  
+  # Extract model statistics
+  model_stats <- map_dfr(model_names, function(name) {
+    mod <- fitted_models[[name]]
+    if (is.null(mod)) {
+      return(data.frame(
+        model = name,
+        converged = FALSE,
+        loglik = NA,
+        AIC = NA,
+        BIC = NA,
+        n_params = NA,
+        n_obs = NA
+      ))
+    }
+    
+    data.frame(
+      model = name,
+      converged = mod$opt$convergence == 0,
+      loglik = as.numeric(logLik(mod)),
+      AIC = AIC(mod),
+      BIC = BIC(mod),
+      n_params = length(mod$estimates),
+      n_obs = nrow(mod$data$mf)
+    )
+  })
+  
+  # Calculate differences from reference
+  ref_stats <- model_stats[model_stats$model == reference_model, ]
+  model_stats <- model_stats %>%
+    mutate(
+      delta_AIC = AIC - ref_stats$AIC,
+      delta_BIC = BIC - ref_stats$BIC,
+      delta_loglik = loglik - ref_stats$loglik
+    )
+  
+  # Perform LR tests for nested models
+  lrt_results <- map_dfr(model_names[model_names != reference_model], function(name) {
+    mod1 <- fitted_models[[reference_model]]
+    mod2 <- fitted_models[[name]]
+    
+    if (is.null(mod1) || is.null(mod2) || !mod1$opt$convergence == 0 || !mod2$opt$convergence == 0) {
+      return(data.frame(
+        model = name,
+        lrt_stat = NA,
+        lrt_df = NA,
+        lrt_pval = NA
+      ))
+    }
+    
+    lrt <- tryCatch({
+      lrtest.msm(mod1, mod2)
+    }, error = function(e) {
+      warning(paste("LR test failed for", name, ":", e$message))
+      return(c(NA, NA, NA))
+    })
+    
+    data.frame(
+      model = name,
+      lrt_stat = lrt[1],
+      lrt_df = lrt[2],
+      lrt_pval = lrt[3]
+    )
+  })
+  
+  # Merge results
+  final_results <- model_stats %>%
+    left_join(lrt_results, by = "model") %>%
+    arrange(AIC)
+  
+  return(final_results)
+}
+
+#' Compare models with different state structures
+#' @param fitted_models List of fitted msm models
+#' @param model_pairs Data frame with columns model1, model2 for pairwise comparisons
+#' @param cores Number of cores for parallel computation
+#' @return Data frame with comparison metrics
+compare_different_structure_models <- function(fitted_models, model_pairs, cores = n.cores) {
+  
+  safe_draic <- safely(draic.msm)
+  safe_drlcv <- safely(drlcv.msm)
+  
+  comparison_results <- model_pairs %>%
+    mutate(
+      draic_result = map2(model1, model2, function(m1, m2) {
+        mod1 <- fitted_models[[m1]]
+        mod2 <- fitted_models[[m2]]
+        
+        if (is.null(mod1) || is.null(mod2)) return(NULL)
+        
+        result <- safe_draic(mod1, mod2)
+        if (!is.null(result$result)) {
+          return(list(
+            draic = result$result$draic,
+            draic_se = result$result$se,
+            draic_ll = result$result$ti["2.5%"],
+            draic_ul = result$result$ti["97.5%"],
+            draic_pval = result$result$ti["Prob<0"]
+          ))
+        } else {
+          warning(paste("DRAIC failed for", m1, "vs", m2, ":", result$error$message))
+          return(NULL)
+        }
+      }),
+      
+      drlcv_result = map2(model1, model2, function(m1, m2) {
+        mod1 <- fitted_models[[m1]]
+        mod2 <- fitted_models[[m2]]
+        
+        if (is.null(mod1) || is.null(mod2)) return(NULL)
+        
+        result <- safe_drlcv(mod1, mod2, cores = cores)
+        if (!is.null(result$result)) {
+          return(list(
+            drlcv = result$result$drlcv,
+            drlcv_se = result$result$se,
+            drlcv_ll = result$result$ti["2.5%"],
+            drlcv_ul = result$result$ti["97.5%"],
+            drlcv_pval = result$result$ti["Prob<0"]
+          ))
+        } else {
+          warning(paste("DRLCV failed for", m1, "vs", m2, ":", result$error$message))
+          return(NULL)
+        }
+      })
+    )
+  
+  # Extract results
+  final_results <- comparison_results %>%
+    mutate(
+      draic = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic)),
+      draic_ll = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic_ll)),
+      draic_ul = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic_ul)),
+      draic_pval = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic_pval)),
+      
+      drlcv = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv)),
+      drlcv_ll = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv_ll)),
+      drlcv_ul = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv_ul)),
+      drlcv_pval = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv_pval))
+    ) %>%
+    dplyr::select(-draic_result, -drlcv_result)
+  
+  return(final_results)
+}
+
+
 # Predictive performance functions ----------------------------------------
 
 #' Calculate predictive outcomes using cross-validation
@@ -714,6 +922,96 @@ calculate_predictive_performance <- function(fitted_models, patient_data, k_fold
   
   bind_rows(predictive_results)
 }
+
+
+# Simulation functions ----------------------------------------------------
+
+#' Simulate patient trajectories from fitted model
+#' @param fitted_model A fitted msm model
+#' @param n_patients Number of patients to simulate
+#' @param max_time Maximum follow-up time
+#' @param start_state Starting state (default: first state)
+#' @param covariates Named list of covariate values
+#' @return Data frame with simulated trajectories
+simulate_trajectories <- function(fitted_model, n_patients = 100, max_time = 30, 
+                                  start_state = NULL, covariates = NULL) {
+  
+  if (is.null(fitted_model)) return(NULL)
+  
+  # Get model states
+  states <- fitted_model$qmodel$state.names
+  if (is.null(start_state)) start_state <- states[1]
+  
+  # Simulate trajectories
+  sim_results <- list()
+  
+  for (i in 1:n_patients) {
+    sim_traj <- tryCatch({
+      sim.msm(fitted_model, 
+              qmatrix = qmatrix.msm(fitted_model, covariates = covariates),
+              maxtime = max_time,
+              start = match(start_state, states))
+    }, error = function(e) NULL)
+    
+    if (!is.null(sim_traj)) {
+      sim_results[[i]] <- data.frame(
+        patient_id = i,
+        time = sim_traj$times,
+        state = states[sim_traj$states]
+      )
+    }
+  }
+  
+  if (length(sim_results) > 0) {
+    return(bind_rows(sim_results))
+  } else {
+    return(NULL)
+  }
+}
+
+#' Calculate outcome predictions for new patients
+#' @param fitted_model A fitted msm model
+#' @param new_data Data frame with new patient covariates
+#' @param prediction_time Time horizon for predictions
+#' @return Data frame with predicted outcomes
+predict_patient_outcomes <- function(fitted_model, new_data, prediction_time = 14) {
+  
+  if (is.null(fitted_model) || nrow(new_data) == 0) return(NULL)
+  
+  outcomes <- map_dfr(1:nrow(new_data), function(i) {
+    patient_covs <- as.list(new_data[i, , drop = FALSE])
+    
+    # Get transition probability matrix
+    pmat <- tryCatch({
+      pmatrix.msm(fitted_model, t = prediction_time, covariates = patient_covs)
+    }, error = function(e) NULL)
+    
+    if (!is.null(pmat)) {
+      # Assuming starting from first state (could be modified)
+      start_state <- 1
+      probs <- pmat[start_state, ]
+      
+      data.frame(
+        patient_id = i,
+        prob_death = probs["D"] %||% 0,
+        prob_recovery = probs["R"] %||% 0,
+        prob_severe = sum(probs[grepl("S", names(probs))]) %||% 0,
+        prob_moderate = sum(probs[grepl("M", names(probs))]) %||% 0
+      )
+    } else {
+      data.frame(
+        patient_id = i,
+        prob_death = NA,
+        prob_recovery = NA,
+        prob_severe = NA,
+        prob_moderate = NA
+      )
+    }
+  })
+  
+  return(bind_cols(new_data, outcomes))
+}
+
 
 
 # Time-varying rate models ------------------------------------------------
@@ -909,4 +1207,248 @@ add_transition_trends <- function(patient_data) {
     filter(!is.na(trend))
   
   return(trend_types)
+}
+
+#' Safe extraction of list elements
+`%||%` <- function(x, y) if (is.null(x) || length(x) == 0 || is.na(x)) y else x
+
+#' Format p-values for reporting
+format_pvalue <- function(p, digits = 3) {
+  case_when(
+    is.na(p) ~ "—",
+    p < 0.001 ~ "<0.001",
+    p < 0.01 ~ paste0("<0.01"),
+    TRUE ~ as.character(round(p, digits))
+  )
+}
+
+#' Format confidence intervals
+format_ci <- function(estimate, lower, upper, digits = 2) {
+  paste0(
+    round(estimate, digits), 
+    " (", 
+    round(lower, digits), 
+    "—", 
+    round(upper, digits), 
+    ")"
+  )
+}
+
+#' Calculate model weights from AIC values
+calculate_aic_weights <- function(aic_values) {
+  delta_aic <- aic_values - min(aic_values, na.rm = TRUE)
+  relative_likelihood <- exp(-0.5 * delta_aic)
+  weights <- relative_likelihood / sum(relative_likelihood, na.rm = TRUE)
+  return(weights)
+}
+
+#' Extract transition-specific hazard ratios
+extract_hazard_ratios <- function(fitted_model, covariate_name, reference_value = 0, 
+                                  comparison_value = 1) {
+  
+  if (is.null(fitted_model)) return(NULL)
+  
+  # Get hazard ratios
+  hr_result <- tryCatch({
+    hazard.msm(fitted_model, 
+               hazard.scale = comparison_value - reference_value,
+               ci = "normal")
+  }, error = function(e) NULL)
+  
+  if (!is.null(hr_result)) {
+    hr_df <- as.data.frame(hr_result) %>%
+      rownames_to_column("transition") %>%
+      rename_with(~gsub("^[^.]*\\.", "", .x), .cols = everything()) %>%
+      mutate(
+        covariate = covariate_name,
+        comparison = paste(comparison_value, "vs", reference_value)
+      )
+    
+    return(hr_df)
+  } else {
+    return(NULL)
+  }
+}
+
+#' Create model summary table
+create_model_summary_table <- function(model_list, include_metrics = c("AIC", "BIC", "logLik")) {
+  
+  summary_table <- map_dfr(names(model_list), function(model_name) {
+    model <- model_list[[model_name]]
+    
+    if (is.null(model)) {
+      result <- data.frame(model = model_name, converged = FALSE)
+      for (metric in include_metrics) {
+        result[[metric]] <- NA
+      }
+      return(result)
+    }
+    
+    result <- data.frame(
+      model = model_name,
+      converged = model$opt$convergence == 0,
+      n_params = length(model$estimates),
+      n_subjects = length(unique(model$data$mf)))
+    
+    if ("AIC" %in% include_metrics) result$AIC <- AIC(model)
+    if ("BIC" %in% include_metrics) result$BIC <- BIC(model)  
+    if ("logLik" %in% include_metrics) result$logLik <- as.numeric(logLik(model))
+    
+    return(result)
+  })
+  
+  return(summary_table)
+}
+
+
+# Plotting functions ------------------------------------------------------
+
+#' Create survival curves from multi-state model
+#' @param fitted_model A fitted msm model
+#' @param times Vector of time points
+#' @param covariates List of covariate scenarios
+#' @return ggplot object with survival curves
+plot_survival_curves <- function(fitted_model, times = seq(0, 30, 1), covariates = list()) {
+  
+  if (is.null(fitted_model)) return(NULL)
+  
+  states <- fitted_model$qmodel$state.names
+  absorbing_states <- c("D", "R")
+  
+  # If no covariates specified, use mean values
+  if (length(covariates) == 0) {
+    covariates <- list("Mean values" = NULL)
+  }
+  
+  # Calculate survival probabilities for each covariate scenario
+  survival_data <- map_dfr(names(covariates), function(scenario_name) {
+    scenario_covs <- covariates[[scenario_name]]
+    
+    scenario_probs <- map_dfr(times, function(t) {
+      if (t == 0) {
+        # Starting probabilities (assume start in first non-absorbing state)
+        start_state <- states[!states %in% absorbing_states][1]
+        probs <- setNames(rep(0, length(states)), states)
+        probs[start_state] <- 1
+      } else {
+        # Get transition probabilities
+        pmat <- tryCatch({
+          pmatrix.msm(fitted_model, t = t, covariates = scenario_covs)
+        }, error = function(e) NULL)
+        
+        if (!is.null(pmat)) {
+          start_state_idx <- which(!states %in% absorbing_states)[1]
+          probs <- pmat[start_state_idx, ]
+        } else {
+          probs <- setNames(rep(NA, length(states)), states)
+        }
+      }
+      
+      data.frame(
+        time = t,
+        scenario = scenario_name,
+        prob_alive = 1 - (probs["D"] %||% 0),
+        prob_recovered = probs["R"] %||% 0,
+        prob_hospitalized = 1 - sum(probs[absorbing_states], na.rm = TRUE)
+      )
+    })
+    
+    return(scenario_probs)
+  })
+  
+  # Create survival plot
+  survival_long <- survival_data %>%
+    pivot_longer(cols = starts_with("prob_"), names_to = "outcome", values_to = "probability") %>%
+    mutate(
+      outcome = case_when(
+        outcome == "prob_alive" ~ "Survival (alive)",
+        outcome == "prob_recovered" ~ "Recovery",
+        outcome == "prob_hospitalized" ~ "Still hospitalized"
+      )
+    )
+  
+  p <- ggplot(survival_long, aes(x = time, y = probability, color = outcome, linetype = scenario)) +
+    geom_line(size = 1) +
+    scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+    scale_color_manual(values = c("Survival (alive)" = "darkgreen", 
+                                  "Recovery" = "blue", 
+                                  "Still hospitalized" = "orange")) +
+    labs(
+      title = "Survival and Outcome Curves",
+      x = "Time (days)",
+      y = "Probability",
+      color = "Outcome",
+      linetype = "Scenario"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  
+  return(p)
+}
+
+#' Create transition flow diagram
+#' @param qmatrix Transition intensity matrix
+#' @param model_name Name of the model
+#' @return ggplot object
+plot_transition_diagram <- function(qmatrix, model_name = "") {
+  
+  # Extract non-zero transitions
+  transitions <- as.data.frame(as.table(qmatrix)) %>%
+    rename(from = Var1, to = Var2, rate = Freq) %>%
+    filter(rate > 0, from != to) %>%
+    mutate(
+      rate_category = case_when(
+        rate < 0.01 ~ "Very Low",
+        rate < 0.05 ~ "Low", 
+        rate < 0.1 ~ "Moderate",
+        TRUE ~ "High"
+      )
+    )
+  
+  # Create state positions (simple layout)
+  states <- unique(c(as.character(transitions$from), as.character(transitions$to)))
+  n_states <- length(states)
+  
+  # Arrange states in a circle
+  angles <- seq(0, 2*pi, length.out = n_states + 1)[1:n_states]
+  state_positions <- data.frame(
+    state = states,
+    x = cos(angles),
+    y = sin(angles)
+  )
+  
+  # Add positions to transitions
+  transitions <- transitions %>%
+    left_join(state_positions, by = c("from" = "state")) %>%
+    rename(x_from = x, y_from = y) %>%
+    left_join(state_positions, by = c("to" = "state")) %>%
+    rename(x_to = x, y_to = y)
+  
+  # Create plot
+  p <- ggplot() +
+    # Draw transitions as arrows
+    geom_segment(data = transitions,
+                 aes(x = x_from, y = y_from, xend = x_to, yend = y_to, 
+                     color = rate_category, size = rate),
+                 arrow = arrow(length = unit(0.3, "cm"), type = "closed")) +
+    # Draw states as circles
+    geom_point(data = state_positions, aes(x = x, y = y), 
+               size = 15, color = "white", fill = "lightblue", shape = 21, stroke = 2) +
+    # Add state labels
+    geom_text(data = state_positions, aes(x = x, y = y, label = state), 
+              size = 4, fontface = "bold") +
+    # Styling
+    scale_color_manual(values = c("Very Low" = "gray70", "Low" = "steelblue", 
+                                  "Moderate" = "orange", "High" = "red")) +
+    scale_size_continuous(range = c(0.5, 2)) +
+    coord_fixed() +
+    theme_void() +
+    theme(legend.position = "bottom") +
+    labs(
+      title = paste("Transition Diagram:", model_name),
+      color = "Transition Rate",
+      size = "Rate Magnitude"
+    )
+  
+  return(p)
 }
