@@ -1,0 +1,42 @@
+---
+title: "Descriptives for multi-state modeling"
+author: "Ariktha Srivathsan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(here)
+```
+
+```{r Load data and functions, include = FALSE}
+source(here("scripts", "00-config.R"))
+source(here("scripts", "00-functions.R"))
+
+# Load data
+dem_raw <- readRDS(here("data", "pt_demographics.rds"))
+stg_raw <- readRDS(here("data", "pt_enc_staging.rds"))
+
+# Load model specs
+clinical_trajectory <- read_csv(here("data", "model-specs.csv"))
+```
+
+```{r}
+dim(dem_raw)
+dim(stg_raw)
+
+head(dem_raw, 3)
+head(stg_raw, 3)
+
+table(stg_raw$stage)
+```
+

@@ -1,0 +1,37 @@
+---
+title: "COVID-19 Multi-State Markov Model Structure Analysis"
+author: "Ariktha Srivathsan"
+date: "`r Sys.Date()`"
+site: bookdown::bookdown_site
+output: 
+  bookdown::gitbook:
+    split_by: chapter
+    config:
+      toc:
+        collapse: subsection
+        scroll_highlight: yes
+      search: yes
+---
+
+# Overview {-}
+
+This analysis examines model structures COVID-19 patient trajectories using multi-state Markov models. The analysis is structured in several stages:
+
+1. Data Processing
+    - Filtering encounters
+    - Processing raw data files
+    - Creating patient staging data
+    
+2. Model Development
+    - Base model fitting
+    - Testing Markov assumptions
+    - Covariate selection
+
+## Model Configurations
+
+The analysis considers four model structures:
+
+- 4-state model: M, S, R, D (Moderate, Severe, Recovered, Dead)
+- 5-state model: M, MS, S, R, D (adds Moderate with history of Severe)
+- 6-state model: M1, M2, MS, S, R, D (splits Moderate into two stages)
+- 7-state model: M1, M2, M3, MS, S, R, D (splits Moderate into three stages)

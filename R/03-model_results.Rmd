@@ -1,0 +1,730 @@
+---
+title: "Markov models for COVID-19 clinical trajectories: Base models"
+author: "Ariktha Srivathsan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+library(here)
+library(tidyverse)
+library(kableExtra)
+library(patchwork)
+library(parallel)
+library(furrr)
+library(purrr)
+library(progressr)
+library(doParallel)
+
+options(knitr.kable.NA = "-")
+```
+
+```{r Load data and functions, include = FALSE}
+source(here("scripts", "00-config.R"))
+source(here("scripts", "00-functions.R"))
+
+refit_models <- FALSE
+
+# # Load data
+# dem_raw <- readRDS(here("data", "pt_demographics.rds"))
+# stg_raw <- readRDS(here("data", "pt_enc_staging.rds"))
+# 
+# # Load model specs
+# clinical_trajectory <- read_csv(here("data", "model-specs.csv"))
+
+pt_stg <- readRDS(here("data", "temp", "pt_stg.rds"))
+
+fitted_models <- readRDS(here("data", "temp", "models.rds"))
+tidied_base_results <- readRDS(here("data", "temp", "mod_rates_tidy.rds"))
+tidied_base_pmats <- readRDS(here("data", "temp", "mod_pmats_tidy.rds"))
+
+qmat_list <- readRDS(here("data", "temp", "mod_qmat_list.rds"))
+crude_rates <- readRDS(here("data", "temp", "mod_crude_rates.rds"))
+```
+
+M = Moderate; S = Severe; R = Recovered; D = Dead MS = Moderate with a
+history of Severe
+
+When there are multiple M stages, they are numbered sequentially (e.g.,
+M1, M2, M3) based on the WHO clinical progression scale for COVID-19
+(<https://www.who.int/docs/default-source/documents/emergencies/minimalcoreoutcomemeasure.pdf>)
+
+Staging based on <https://pmc.ncbi.nlm.nih.gov/articles/PMC9196693/>
+
+-   Base model - M, S, R, D
+
+-   2 Moderate states - M1, M2, S, R, D
+
+-   3 Moderate states - M1, M2, M3, S, R, D
+
+-   2 severe states - M, S1, S2, R, D
+
+-   History of severe - M, MS, S, R, D
+
+-   Reduced transitions - M, S, R, D; Can only do M -\> D through S and
+    S -\> R through M
+    
+```{r}
+# Create lookup table for transition trend categories
+
+trend_types <- cross_join(tibble(from = c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2")),
+                          tibble(to = c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2", "R", "D"))) %>%
+  mutate(from_type = substring(from, 1, 1),
+         to_type = substring(to, 1, 1)) %>%
+  mutate(trend = case_when(
+    from == to ~ "Self-transition",
+    to == "R" ~ "Recovery",
+    to == "D" ~ "Death",
+    from_type == "M" & to_type == "M" & as.numeric(sub("M", "", to)) > as.numeric(sub("M", "", from)) ~ "Worse",
+    from_type == "M" & to_type == "M" & as.numeric(sub("M", "", to)) < as.numeric(sub("M", "", from)) ~ "Better",
+    from_type == "M" & to_type == "S" ~ "Worse",
+    from_type == "S" & to_type == "M" ~ "Better",
+    from_type == "S" & to_type == "S" & as.numeric(sub("S", "", to)) > as.numeric(sub("S", "", from)) ~ "Worse",
+    from_type == "S" & to_type == "S" & as.numeric(sub("S", "", to)) < as.numeric(sub("S", "", from)) ~ "Better",
+    from_type == "M" & to == "MS" ~ NA,
+    from == "MS" & to_type == "M" ~ NA,
+    TRUE ~ "Other"
+  )) %>%
+  drop_na()
+
+trend_colors <- c(
+    "Worse" = "indianred2",
+    "Better" = "darkseagreen4",
+    "Death" = "indianred4",
+    "Recovery" = "darkseagreen2",
+    "Self-transition" = "goldenrod",
+    "Other" = "gray50"
+  )
+```
+
+
+```{r crude-rates-table, echo=FALSE}
+
+# Convert list of matrices to tidy long format and back to wide for display
+crude_rates_df <- purrr::imap_dfr(
+  crude_rates,
+  function(mat, mdl) {
+    as.data.frame(mat) %>%
+      rownames_to_column("from") %>%
+      mutate(model = mdl) %>%
+      pivot_longer(cols = where(is.numeric), names_to = "to", values_to = "rate")
+  }
+) %>%
+  pivot_wider(names_from = to, values_from = rate) %>%
+  relocate(model, from)
+
+crude_rates_df %>%
+  dplyr::select(-modelname) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  arrange(model, from) %>%
+  kable(caption = "Crude transition rates (per patient‑day)") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  collapse_rows(columns = 1, valign = "top")
+
+
+```
+
+## Fitted transition intensities
+
+```{r fitted-rates-table, echo=FALSE}
+# Build a lookup list that maps numeric state indices to state names for each model
+state_lookup <- purrr::imap(qmat_list, ~setNames(rownames(.x), seq_along(rownames(.x))))
+
+# Prepare table
+fitted_intens_df <- tidied_base_results %>%
+  dplyr::filter(parclass == "intens") %>%
+  rowwise() %>%
+  mutate(
+    from_label = state_lookup[[model]][as.character(state)],
+    to_label   = state_lookup[[model]][as.character(tostate)]
+  ) %>%
+  ungroup() %>%
+  mutate(across(c(estimate, conf.low, conf.high), ~round(.x, 3))) %>%
+  arrange(model, from_label, to_label) %>%
+  dplyr::select(model, from = from_label, to = to_label, estimate, conf.low, conf.high)
+
+fitted_intens_df %>%
+  kable(caption = "Fitted transition intensities (per day)") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+```{r}
+
+fitted_intens_plot <- fitted_intens_df %>%
+  mutate(from = unname(from),
+         to = unname(to)) %>%
+  left_join(trend_types, by = c("from", "to"))
+
+# Create a forest plot for fitted transition intensities for each model, with CIs
+
+ggplot(fitted_intens_plot, aes(x = estimate, y = fct_rev(paste0(from, " → ", to)), color = trend)) +
+  geom_point(size = 2.5) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  facet_wrap(~ model, scales = "free_y") +
+  scale_x_continuous(limits = c(0, max(fitted_intens_df$conf.high, na.rm = TRUE))) +
+  scale_color_manual(values = trend_colors) +
+  labs(x = "Fitted transition intensity (per day)", y = "Transition") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+```
+
+
+## Estimated transition probabilities (P‑mats)
+
+### 1-day transition probabilities
+
+The probability of a patient being in each possible state 1 day later,
+given their current state.
+
+```{r pmats-table}
+# Display estimated 1‑day transition probabilities (pmats), stratified by model
+
+pmats_df <- tidied_base_pmats %>%
+  mutate(across(c(estimate, LL, UL), ~round(.x, 3))) %>%
+  arrange(model, from, to)
+
+pmats_df %>%
+  dplyr::select(model, from, to, estimate, LL, UL) %>%
+  dplyr::filter(!from %in% c("D", "R")) %>%
+  kable(caption = "Estimated 1‑day transition probabilities (rows = current state, columns = next state)") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+```{r pmats-plot}
+# Create a forest plot for all models
+pmats_plot <- pmats_df %>%
+  dplyr::filter(!from %in% c("D", "R")) %>%
+  left_join(trend_types, by = c("from", "to")) %>%
+  left_join(
+    map_dfr(names(fitted_models), function(name) {
+      pt_stg_model <- pt_stg %>% filter(model == name)
+      trans_counts <- pt_stg_model %>%
+        arrange(deid_enc_id, date) %>%
+        group_by(deid_enc_id) %>%
+        mutate(from = state, to = lead(state)) %>%
+        filter(!is.na(to)) %>%
+        count(from, to, name = "n") %>%
+        ungroup() %>%
+        group_by(from, to) %>%
+        summarise(n = sum(n), .groups = "drop") %>%
+        mutate(model = name)
+      trans_counts
+    }),
+    by = c("model", "from", "to")
+  ) %>%  
+  mutate(n = replace_na(n, 0)) %>%  
+  mutate(transition = paste0(from, " → ", to, " (n = ", n, ")"))
+
+panel1 <- pmats_plot %>%
+  dplyr::filter(n != 0) %>%
+  ggplot(aes(x = estimate, y = fct_rev(transition), color = trend, shape = from_type)) +
+  geom_point(size = 2.5) +
+  geom_errorbarh(aes(xmin = LL, xmax = UL), height = 0.2) +
+  facet_wrap(~ model, scales = "free_y") +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_color_manual(values = trend_colors) +  
+  scale_shape_manual(values = c("M" = 16, "S" = 17)) +
+  ggtitle("Estimated 1-day transition probabilities", subtitle = "All possible transitions") +
+  labs(x = "Estimated 1-day transition probability", y = "Transition",
+       color = "To State Type", shape = "From State Type") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+
+panel1
+
+panel2 <- pmats_plot %>%
+  dplyr::filter(!from %in% c("D", "R"), from != to) %>%
+  dplyr::filter(n != 0) %>%
+  ggplot(aes(x = estimate, y = fct_rev(transition), color = trend, shape = from_type)) +
+  geom_point(size = 2.5) +
+  geom_errorbarh(aes(xmin = LL, xmax = UL), height = 0.2) +
+  facet_wrap(~ model, scales = "free_y") +
+  scale_x_continuous(limits = c(0, 0.26)) +
+  scale_color_manual(values = trend_colors) +  
+  scale_shape_manual(values = c("M" = 16, "S" = 17)) +
+  ggtitle("1-day transition probabilities", subtitle = "Excluding self-transitions") +
+  labs(x = "Estimated 1-day transition probability", y = "Transition",
+       color = "To State Type", shape = "From State Type") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+
+panel2
+
+# panel1 + panel2 +
+#   plot_layout(ncol = 1, guides = "collect") +
+#   plot_annotation(title = "Estimated 1-day transition probabilities") &
+#   theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+#         plot.caption = element_text(hjust = 0.5),
+#         legend.position = "bottom")
+
+```
+
+### 5-day transition probabilities
+
+The probability of a patient being in each possible state 5 days later,
+given their current state.
+
+```{r pmats-5day-table, echo=FALSE}
+
+# Compute 5‑day transition probability matrices for each fitted model
+pmats_5day_df <- purrr::imap_dfr(
+  fitted_models,
+  function(fit, mdl) {
+    mat5 <- msm::pmatrix.msm(fit, t = 5, ci = "normal")
+    mat5 <- tidy(mat5) %>%
+      mutate(model = mdl)
+    # as.data.frame(as.table(mat5)) %>%       
+    #   rename(from = Var1, to = Var2, prob = Freq) %>%
+    #   mutate(model = mdl)
+  }
+) %>%
+  rename(from = statename, to = tostatename, LL = conf.low, UL = conf.high) %>%
+  dplyr::select(model, from, to, estimate, LL, UL)
+
+pmats_5day_wide <- pmats_5day_df %>%
+  dplyr::select(model, from, to, estimate) %>%
+  pivot_wider(names_from = to, values_from = estimate) %>%
+  relocate(model, from) %>%
+  dplyr::filter(from != "D", from != "R")
+
+pmats_5day_wide %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  arrange(model, from) %>%
+  kable(caption = "Estimated 5‑day transition probabilities (rows = current state, columns = state after 5 days)") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+```{r pmats-5day-plot}
+
+# Create a forest plot for 5-day transition probabilities
+
+pmats_5day_plot <- pmats_5day_df %>%
+  dplyr::filter(!from %in% c("D", "R")) %>%
+  left_join(trend_types, by = c("from", "to")) %>%
+  mutate(transition = paste0(from, " → ", to))
+
+panel1_5day <- pmats_5day_plot %>%
+  ggplot(aes(x = estimate, y = fct_rev(transition), color = trend, shape = from_type)) +
+  geom_point(size = 2.5) +
+  geom_errorbarh(aes(xmin = LL, xmax = UL), height = 0.2) +
+  facet_wrap(~ model, scales = "free_y") +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_color_manual(values = trend_colors) +  
+  scale_shape_manual(values = c("M" = 16, "S" = 17)) +
+  ggtitle("Estimated 5-day transition probabilities", subtitle = "All possible transitions") +
+  labs(x = "Estimated 5-day transition probability", y = "Transition",
+       color = "To State Type", shape = "From State Type") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+  
+panel1_5day
+
+```
+
+### Sojourn Times
+
+```{r sojourn-times}
+
+# Convert sojourn times to tidy format
+sojourn_df <- imap_dfr(
+  fitted_models,
+  function(fit, model_name) {
+    sj <- msm::sojourn.msm(fit)
+    
+    # Map numeric state index → state name
+    state_names <- state_lookup[[model_name]][as.character(seq_along(sj$estimates))]
+
+    tibble(
+      model = model_name,
+      state = state_names,
+      estimate = sj$estimates,
+      se = sj$SE,
+      conf.low = sj$L,
+      conf.high = sj$U
+    )
+  }
+) %>%
+  mutate(across(c(estimate, conf.low, conf.high), \(x) round(x, 2))) %>%
+  arrange(model, state)
+
+# Sojourn time table
+sojourn_df %>%
+  kable(
+    caption = "Estimated sojourn times (mean time spent in each state, in days)",
+    col.names = c("Model", "State", "Estimate", "SE", "Lower CI", "Upper CI")
+  ) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  collapse_rows(columns = 1, valign = "top")
+
+
+```
+
+```{r sojourn-plot}
+
+sojourn_df %>%
+  mutate(
+    state_type = case_when(
+      str_starts(state, "M") ~ "Moderate",
+      str_starts(state, "S") ~ "Severe",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  ggplot(aes(x = estimate, y = fct_rev(state), color = state_type)) +
+  geom_point(size = 2.5) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  facet_wrap(~ model, scales = "free_y") +
+  scale_color_manual(values = c(
+    "Moderate" = "darkseagreen4",
+    "Severe" = "indianred3",
+    "Other" = "gray50"
+  )) +
+  labs(
+    title = "Estimated Sojourn Times",
+    subtitle = "Mean time spent in each state before transition",
+    x = "Sojourn time (days)",
+    y = "State",
+    color = "State Type"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom"
+  )
+
+
+```
+
+## Compare models
+
+Positive values for these criteria indicate the coarse model is preferred, 
+while negative values indicate the full model is preferred. \\
+
+The ΔRLCV table shows pairwise differences in the *robust
+leave‑cluster‑out cross‑validation* score, an out‑of‑sample metric where
+lower values indicate better predictive performance.
+
+### State Granularity
+
+#### Number of moderate states
+
+```{r Compare n mod states}
+
+redo_mod_comp <- FALSE
+
+if(redo_mod_comp){
+  
+  start_time <- Sys.time()
+  a <- draic.msm(fitted_models[["mod_3"]], fitted_models[["mod_2"]])
+  b <- draic.msm(fitted_models[["mod_3"]], fitted_models[["base_model"]])
+  c <- draic.msm(fitted_models[["mod_2"]], fitted_models[["base_model"]])
+  end_time <- Sys.time()
+  
+  message(glue::glue("DRAIC computation time: {round(difftime(end_time, start_time, units = 'mins'), 2)} minutes"))
+  
+  start_time <- Sys.time()
+  
+  d <- drlcv.msm(fitted_models[["mod_3"]], fitted_models[["mod_2"]], cores = n.cores)
+  e <- drlcv.msm(fitted_models[["mod_3"]], fitted_models[["base_model"]], cores = n.cores)
+  f <- drlcv.msm(fitted_models[["mod_2"]], fitted_models[["base_model"]], cores = n.cores)
+  
+  end_time <- Sys.time()
+  
+  message(glue::glue("DRLCV computation time: {round(difftime(end_time, start_time, units = 'mins'), 2)} minutes"))
+  
+  saveRDS(a, here("data", "temp", "mod_3_mod_2_draic.rds"))
+  saveRDS(b, here("data", "temp", "mod_3_base_draic.rds"))
+  saveRDS(c, here("data", "temp", "mod_2_base_draic.rds"))
+  saveRDS(d, here("data", "temp", "mod_3_mod_2_drlcv.rds"))
+  saveRDS(e, here("data", "temp", "mod_3_base_drlcv.rds"))
+  saveRDS(f, here("data", "temp", "mod_2_base_drlcv.rds"))
+} else {
+  a <- readRDS(here("data", "temp", "mod_3_mod_2_draic.rds"))
+  b <- readRDS(here("data", "temp", "mod_3_base_draic.rds"))
+  c <- readRDS(here("data", "temp", "mod_2_base_draic.rds"))
+  
+  d <- readRDS(here("data", "temp", "mod_3_mod_2_drlcv.rds"))
+  e <- readRDS(here("data", "temp", "mod_3_base_drlcv.rds"))
+  f <- readRDS(here("data", "temp", "mod_2_base_drlcv.rds"))
+}
+
+
+mod_states_comp_fit <- tibble(
+  model1_name = c("mod_3", "mod_3", "mod_2"),
+  model2_name = c("mod_2", "base_model", "base_model"),
+  draic = list(a, b, c),
+  drlcv = list(d, e, f)
+)
+
+mod_states_comp <- mod_states_comp_fit %>%
+  mutate(
+    draic_ti = map(draic, ~.x$ti),
+    draic_ll = map_dbl(draic_ti, possibly(~ .x[["2.5%"]], NA_real_)),
+    draic_ul = map_dbl(draic_ti, possibly(~ .x[["97.5%"]], NA_real_)),
+    draic_pval = map_dbl(draic_ti, possibly(~ .x[["Prob<0"]], NA_real_)),
+
+    drlcv_ti = map(drlcv, ~.x$ti),
+    drlcv_ll = map_dbl(drlcv_ti, possibly(~ .x[["2.5%"]], NA_real_)),
+    drlcv_ul = map_dbl(drlcv_ti, possibly(~ .x[["97.5%"]], NA_real_)),
+    drlcv_pval = map_dbl(drlcv_ti, possibly(~ .x[["Prob<0"]], NA_real_))
+  ) %>%
+  dplyr::select(
+    model1_name, model2_name,
+    draic_ll, draic_ul, draic_pval,
+    drlcv_ll, drlcv_ul, drlcv_pval
+  )
+
+mod_states_comp %>%
+  kableExtra::kable(caption = "Model comparison for number of moderate states")
+
+mod_state_models <- tibble(
+  model_name = c("mod_2", "mod_3", "base_model"),
+  model = map(model_name, ~ fitted_models[[.x]])
+) %>%
+  mutate(
+    AIC = map_dbl(model, possibly(~ AIC(.x), NA_real_)),
+    BIC = map_dbl(model, possibly(~ BIC(.x), NA_real_)),
+    logLik = map_dbl(model, possibly(~ as.numeric(logLik(.x)), NA_real_))
+  )
+
+mod_state_models %>%
+  dplyr::select(-model) %>%
+  arrange(model_name) %>%
+  kableExtra::kable(caption = "Model fit statistics for number of moderate states") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+
+```
+
+#### Number of severe states
+
+```{r Compare n sev states}
+
+g <- draic.msm(fitted_models[["sev_2"]], fitted_models[["base_model"]])
+h <- drlcv.msm(fitted_models[["sev_2"]], fitted_models[["base_model"]], cores = n.cores)
+
+sev_states_comp_fit <- tibble(
+  model1_name = c("sev_2"),
+  model2_name = c("base_model"),
+  draic = list(g),
+  drlcv = list(h)
+)
+
+sev_states_comp <- sev_states_comp_fit %>%
+  mutate(
+    draic_val = map_dbl(draic, ~.x$draic),
+    draic_ll = map_dbl(draic, ~.x$ti["2.5%"]),
+    draic_ul = map_dbl(draic, ~.x$ti["97.5%"]),
+    draic_pval = map_dbl(draic, ~.x$ti["Prob<0"]),
+    drlcv_val = map_dbl(drlcv, ~.x$drlcv),
+    drlcv_ll = map_dbl(drlcv, ~.x$ti["2.5%"]),
+    drlcv_ul = map_dbl(drlcv, ~.x$ti["97.5%"]),
+    drlcv_pval = map_dbl(drlcv, ~.x$ti["Prob<0"])
+  ) %>%
+  dplyr::select(model1_name, model2_name,
+                draic = draic_val, draic_ll, draic_ul, draic_pval,
+                drlcv = drlcv_val, drlcv_ll, drlcv_ul, drlcv_pval)
+  
+sev_states_comp %>%
+  kableExtra::kable(caption = "Model comparison for number of severe states")
+
+```
+
+### Simpler transitions
+Can't go M -> D without passing through S, and S -> R without passing through M
+
+```{r}
+
+j <- draic.msm(fitted_models[["reduced_trans"]], fitted_models[["base_model"]])
+k <- drlcv.msm(fitted_models[["reduced_trans"]], fitted_models[["base_model"]], cores = n.cores)
+
+trans_comp_fit <- tibble(
+  model2_name = c("reduced_trans"),
+  model1_name = c("base_model"),
+  draic = list(j),
+  drlcv = list(k)
+)
+
+trans_comp <- trans_comp_fit %>%
+  mutate(
+    draic_val = map_dbl(draic, ~.x$draic),
+    draic_ll = map_dbl(draic, ~.x$ti["2.5%"]),
+    draic_ul = map_dbl(draic, ~.x$ti["97.5%"]),
+    draic_pval = map_dbl(draic, ~.x$ti["Prob<0"]),
+    drlcv_val = map_dbl(drlcv, ~.x$drlcv),
+    drlcv_ll = map_dbl(drlcv, ~.x$ti["2.5%"]),
+    drlcv_ul = map_dbl(drlcv, ~.x$ti["97.5%"]),
+    drlcv_pval = map_dbl(drlcv, ~.x$ti["Prob<0"])
+  ) %>%
+  dplyr::select(model1_name, model2_name,
+                draic = draic_val, draic_ll, draic_ul, draic_pval,
+                drlcv = drlcv_val, drlcv_ll, drlcv_ul, drlcv_pval)
+  
+trans_comp %>%
+  kableExtra::kable(caption = "Model comparison for simpler transitions")
+
+```
+
+```{r}
+
+library(tableone)
+
+dem_raw <- readRDS(here("data", "pt_demographics.rds"))
+stg_raw <- readRDS(here("data", "pt_enc_staging.rds"))
+
+head(pt_stg)
+head(dem_raw)
+head(stg_raw)
+
+colnames(pt_stg)
+colnames(dem_raw)
+colnames(stg_raw)
+
+length(unique(pt_stg$deid_enc_id))
+
+vars <- c("age", "sex", "race", "ethnicity", "language", "insurance_type", 
+          "smoking", "BMI", "bmi_cat", "COVID_vax_doses", "COVID_vax", 
+          "cci_score", "cci_fct", "chf", "cci_cat", "copd", "DNR", 
+          "dnr_on_admit", "LOS")
+
+# Create Table 1 stratified by death outcome
+tab1 <- CreateTableOne(vars = vars, strata = "end_in_death", data = dem_raw, factorVars = c("sex", "race", "ethnicity", "language", "insurance_type", 
+                                                                                             "smoking", "bmi_cat", "COVID_vax", "cci_fct", "chf", 
+                                                                                             "cci_cat", "copd", "DNR", "dnr_on_admit"), addOverall = TRUE)
+
+# Print Table 1
+print(tab1, showAllLevels = TRUE, quote = TRUE, noSpaces = TRUE)
+
+# Filter for base model
+base_model_data <- pt_stg %>%
+  filter(model == "base_model") %>%
+  arrange(deid_enc_id, DaysSinceEntry)
+
+# Compute total transitions across all patients
+state_transitions <- base_model_data %>%
+  group_by(deid_enc_id) %>%
+  mutate(from = state,
+         to = lead(state)) %>%
+  filter(!is.na(to)) %>%
+  ungroup() %>%
+  count(from, to) %>%
+  arrange(desc(n))
+
+# Print long format transition counts
+print(state_transitions)
+
+# Optional: Pivot to a wide matrix format
+transition_matrix <- state_transitions %>%
+  pivot_wider(names_from = to, values_from = n, values_fill = 0)
+
+print(transition_matrix)
+
+```
+
+
+
+### Covariates
+
+
+## Markov property
+
+
+
+
+
+```{r Save results, include = FALSE}
+# save(pt_stg, crude_rates, fitted_base_models, tidied_base_results, file = here("data", "temp", "base_model_results.RData"))
+# 
+# saveRDS(pt_stg, here("data", "temp", "pt_enc_mod_staging.rds"))
+# saveRDS(crude_rates, here("data", "temp", "crude_base_rates.rds"))
+# 
+# saveRDS(fitted_base_models, here("data", "temp", "base_models.rds"))
+# saveRDS(tidied_base_results, here("data", "temp", "base_mod_rates_tidy.rds"))
+# saveRDS(tidied_base_pmats, here("data", "temp", "base_mod_pmats_tidy.rds"))
+# saveRDS(cross_tab_draic_tidy, here("data", "temp", "base_mod_draic.rds"))
+# saveRDS(cross_tab_drlcv_tidy, here("data", "temp", "base_mod_drlcv.rds"))
+
+# # Save the Q matrices for documentation or re-fitting
+# saveRDS(qmat_list, here("data", "temp", "base_qmat_list.rds"))
+# 
+# # Save a cleaned summary of fitted 1-day and 5-day probabilities
+# saveRDS(pmats_df, here("data", "temp", "base_mod_pmats_1day.rds"))
+# saveRDS(pmats_5day_df, here("data", "temp", "base_mod_pmats_5day.rds"))
+# 
+# # Save fitted sojourn times if you compute them later
+# sojourns_list <- map(fitted_base_models, ~sojourn.msm(.x))
+# saveRDS(sojourns_list, here("data", "temp", "base_mod_sojourns.rds"))
+
+```
+
+```{r graveyard, eval = FALSE}
+draic_and_drlcv <- function(cross_tab, verbose = TRUE) {
+  plan(multisession)
+
+  # Progress bar setup
+  handlers(global = TRUE)
+  if (verbose) message("Starting parallel computation...")
+
+  # Wrap functions to safely capture errors
+  safe_draic <- safely(draic.msm)
+  # safe_drlcv <- safely(drlcv.msm)
+
+  # Execute with progress bar
+  with_progress({
+    p <- progressor(steps = nrow(cross_tab))
+
+    results <- future_pmap(
+      .l = list(cross_tab$model1_name, cross_tab$model2_name),
+      .f = ~{
+        mod1 <- fitted_models[[..1]]
+        mod2 <- fitted_models[[..2]]
+        
+        if (verbose) message(glue::glue("Comparing {..1} vs {..2}..."))
+
+        draic_res <- safe_draic(mod1, mod2)
+        # drlcv_res <- safe_drlcv(mod1, mod2, cores = 10)
+
+        p()  # progress step
+
+        list(
+          draic = draic_res$result,
+          draic_error = draic_res$error,
+          # drlcv = drlcv_res$result,
+          # drlcv_error = drlcv_res$error
+        )
+      }
+    )
+  })
+
+  # Assemble output
+  cross_tab %>%
+    mutate(results = results) %>%
+    mutate(
+      draic = map(results, "draic"),
+      draic_error = map(results, "draic_error")
+      # drlcv = map(results, "drlcv"),
+      # drlcv_error = map(results, "drlcv_error")
+    ) %>%
+    dplyr::select(-results)
+}
+
+```
+
