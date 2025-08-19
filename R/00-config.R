@@ -15,3 +15,13 @@ options(readr.show_col_types = FALSE)
 n.cores = 6
 
 # Defining transition types and corresponding colors
+
+# Define colors for consistency
+trend_colors <- c(
+  "Worse" = "indianred2",
+  "Better" = "darkseagreen4",
+  "Death" = "indianred4",
+  "Recovery" = "darkseagreen2",
+  "Self-transition" = "goldenrod",
+  "Other" = "gray50"
+)
