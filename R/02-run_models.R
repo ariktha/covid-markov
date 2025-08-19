@@ -174,11 +174,11 @@ saveRDS(transition_stats, here("data", "temp", "transition_stats.rds"))
 
 ## Multivariable model with forward selection -----------------------------
 
-model_data <- pt_stg %>% filter(model == best_base_model)
+model_data <- pt_stg %>% filter(model == "base_model")
 
 multivariate_models <- multivariate_selection(
   patient_data = model_data,
-  crude_rates = setNames(list(crude_rates[[best_base_model]]), best_base_model),
+  crude_rates = setNames(list(crude_rates[["base_model"]]), "base_model"),
   covariates = time_invariant_covariates,
   method = "forward",
   alpha_enter = 0.05
@@ -209,6 +209,32 @@ time_varying_stats <- extract_covariate_stats(time_varying_models, fitted_base_m
 # Save results
 saveRDS(time_varying_models, here("data", "temp", "time_varying_models.rds"))
 saveRDS(time_varying_stats, here("data", "temp", "time_varying_stats.rds"))
+
+# Sensitivity analysis for long-stay patients ----------------------------
+
+# Perform sensitivity analysis for patients with stays > 30 days
+sensitivity_results <- sensitivity_analysis_outliers(
+  patient_data = pt_stg_enhanced,
+  crude_rates = crude_rates,
+  cutoff_day = 30
+)
+
+# Calculate model comparison metrics for sensitivity analysis
+sensitivity_comparison <- list(
+  excluded_vs_original = compare_same_structure_models(
+    fitted_models = c(fitted_base_models, sensitivity_results$excluded$models),
+    model_names = names(fitted_base_models)
+  ),
+  truncated_vs_original = compare_same_structure_models(
+    fitted_models = c(fitted_base_models, sensitivity_results$truncated$models),
+    model_names = names(fitted_base_models)
+  )
+)
+
+# Save results
+saveRDS(sensitivity_results, here("data", "temp", "sensitivity_results.rds"))
+saveRDS(sensitivity_comparison, here("data", "temp", "sensitivity_comparison.rds"))
+
 
 # Save all ----------------------------------------------------------------
 
