@@ -1,5 +1,5 @@
-# Enhanced model running script
-# Save as R/02b-run_enhanced_models.R
+
+# Setup -------------------------------------------------------------------
 
 rm(list = ls())
 
@@ -10,16 +10,15 @@ library(splines)
 library(furrr)
 library(parallel)
 
-source(here("scripts", "00-config.R"))
-source(here("scripts", "00-functions.R"))  # Now includes enhanced functions
+source(here("R", "00-config.R"))
+source(here("R", "00-functions.R"))  
 
-# ============================================================================
-# LOAD DATA AND BASE MODELS
-# ============================================================================
+# Load data and base models -----------------------------------------------
 
 # Load previously fitted base models
 fitted_base_models <- readRDS(here("data", "temp", "models.rds"))
-pt_stg <- readRDS(here("data", "temp", "pt_stg.rds"))
+pt_stg_raw <- readRDS(here("data", "temp", "pt_stg.rds"))
+pt_dem <- readRDS(here("data", "pt_demographics.rds"))
 qmat_list <- readRDS(here("data", "temp", "mod_qmat_list.rds"))
 crude_rates <- readRDS(here("data", "temp", "mod_crude_rates.rds"))
 
@@ -27,14 +26,15 @@ crude_rates <- readRDS(here("data", "temp", "mod_crude_rates.rds"))
 time_invariant_covariates <- c("age", "sex", "race", "ethnicity", "language", 
                                "insurance_type", "smoking", "BMI", "bmi_cat", 
                                "COVID_vax_doses", "COVID_vax", "cci_score", 
-                               "cci_fct", "chf", "cci_cat", "copd", "DNR", 
-                               "dnr_on_admit")
+                               "cci_fct", "chf", "cci_cat", "copd", "dnr_on_admit")
 
-continuous_covariates <- c("age", "BMI", "COVID_vax_doses", "cci_score")
+continuous_covariates <- c("age", "BMI", "cci_score")
 
 # Add transition trend categories
-trend_types <- add_transition_trends(pt_stg)
-pt_stg_enhanced <- pt_stg %>%
+trend_types <- add_transition_trends(pt_stg_raw)
+
+pt_stg_enhanced <- pt_stg_raw %>%
+  left_join(pt_dem, by = "deid_enc_id") %>%
   arrange(deid_enc_id, date) %>%
   group_by(deid_enc_id) %>%
   mutate(
@@ -44,9 +44,8 @@ pt_stg_enhanced <- pt_stg %>%
   ungroup() %>%
   left_join(trend_types, by = c("from_state" = "from", "to_state" = "to"))
 
-# ============================================================================
-# COVARIATE MODELS
-# ============================================================================
+
+# Covariate effects -------------------------------------------------------
 
 cat("Fitting univariate covariate models...\n")
 
@@ -68,9 +67,8 @@ saveRDS(covariate_stats, here("data", "temp", "covariate_stats.rds"))
 
 cat("Completed univariate covariate models\n")
 
-# ============================================================================
-# TRANSITION-SPECIFIC EFFECTS
-# ============================================================================
+
+## Transition-specific covariate effects -----------------------------------
 
 cat("Fitting transition-specific effect models...\n")
 
@@ -92,9 +90,8 @@ saveRDS(transition_stats, here("data", "temp", "transition_stats.rds"))
 
 cat("Completed transition-specific effect models\n")
 
-# ============================================================================
-# TIME-VARYING RATE MODELS
-# ============================================================================
+
+# Time-varying rate models ------------------------------------------------
 
 cat("Fitting time-varying rate models...\n")
 
@@ -114,11 +111,10 @@ saveRDS(time_varying_stats, here("data", "temp", "time_varying_stats.rds"))
 
 cat("Completed time-varying rate models\n")
 
-# ============================================================================
-# PREDICTIVE PERFORMANCE ANALYSIS
-# ============================================================================
 
-cat("Calculating predictive performance...\n")
+# Evaluate predictive performance -----------------------------------------
+
+cat("Calculating predictive performance metrics...\n")
 
 # Combine all models for performance comparison
 all_models <- c(
@@ -139,9 +135,8 @@ saveRDS(predictive_performance, here("data", "temp", "predictive_performance.rds
 
 cat("Completed predictive performance analysis\n")
 
-# ============================================================================
-# SENSITIVITY ANALYSIS FOR OUTLIERS
-# ============================================================================
+
+# Sensitivity analyses for patients with long LOS -------------------------
 
 cat("Performing sensitivity analysis for long-stay patients...\n")
 
@@ -170,9 +165,8 @@ saveRDS(sensitivity_comparison, here("data", "temp", "sensitivity_comparison.rds
 
 cat("Completed sensitivity analysis\n")
 
-# ============================================================================
-# MODEL COMPARISONS
-# ============================================================================
+
+# Model comparisons -------------------------------------------------------
 
 cat("Performing comprehensive model comparisons...\n")
 
@@ -185,16 +179,20 @@ same_structure_comparisons <- list(
 )
 
 # Compare models with different structures
+# model1 is the fuller model and model2 is coarser
 model_pairs <- expand_grid(
-  model1 = c("base_model", "mod_2", "mod_3"),
-  model2 = c("sev_2", "hx_sev", "reduced_trans")
+  model1 = c("sev_2", "hx_sev", "mod_2", "mod_3"),
+  model2 = c("base_model")
 ) %>%
-  filter(model1 != model2)
+  rbind(tibble(model1 = c("mod_3", "base_model"), 
+               model2 = c("mod_2", "reduced_trans")))
+
+# model_pairs <- tibble(model1 = "mod_2", model2 = "base_model")
 
 different_structure_comparisons <- compare_different_structure_models(
   fitted_models = fitted_base_models,
   model_pairs = model_pairs,
-  cores = n.cores
+  cores = 8
 )
 
 # Save comparison results
@@ -203,11 +201,10 @@ saveRDS(different_structure_comparisons, here("data", "temp", "different_structu
 
 cat("Completed model comparisons\n")
 
-# ============================================================================
-# DIAGNOSTIC ANALYSIS
-# ============================================================================
 
-cat("Calculating diagnostic metrics...\n")
+# Deviance analysis -------------------------------------------------------
+
+cat("Calculating deviances...\n")
 
 # Calculate deviance residuals for key models
 diagnostic_results <- map(names(fitted_base_models), function(model_name) {
@@ -227,11 +224,10 @@ diagnostic_results <- map(names(fitted_base_models), function(model_name) {
 # Save diagnostic results
 saveRDS(diagnostic_results, here("data", "temp", "diagnostic_results.rds"))
 
-cat("Completed diagnostic analysis\n")
+cat("Completed deviance analysis\n")
 
-# ============================================================================
-# SAVE COMPREHENSIVE RESULTS SUMMARY
-# ============================================================================
+
+# Save comprehensive results ----------------------------------------------
 
 # Create a comprehensive summary
 comprehensive_summary <- list(

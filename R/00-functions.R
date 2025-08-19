@@ -276,12 +276,8 @@ tidy_msm_hr_univ <- function(fitted_msm_models, hr_scale = 1) {
   return(tidied_pmats)
 }
 
-# Enhanced functions for multi-state model analysis with covariates
-# Add to 00-functions.R
 
-# ============================================================================
-# MODEL COMPARISON FUNCTIONS
-# ============================================================================
+# Model comparison functions ----------------------------------------------
 
 #' Compare models with same structure (nested in covariates only)
 #' @param fitted_models List of fitted msm models
@@ -423,25 +419,22 @@ compare_different_structure_models <- function(fitted_models, model_pairs, cores
   final_results <- comparison_results %>%
     mutate(
       draic = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic)),
-      draic_se = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic_se)),
       draic_ll = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic_ll)),
       draic_ul = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic_ul)),
       draic_pval = map_dbl(draic_result, ~ ifelse(is.null(.x), NA, .x$draic_pval)),
       
       drlcv = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv)),
-      drlcv_se = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv_se)),
       drlcv_ll = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv_ll)),
       drlcv_ul = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv_ul)),
       drlcv_pval = map_dbl(drlcv_result, ~ ifelse(is.null(.x), NA, .x$drlcv_pval))
     ) %>%
-    select(-draic_result, -drlcv_result)
+    dplyr::select(-draic_result, -drlcv_result)
   
   return(final_results)
 }
 
-# ============================================================================
-# COVARIATE ANALYSIS FUNCTIONS
-# ============================================================================
+
+# Covariate functions -----------------------------------------------------
 
 #' Fit univariate models with spline testing for continuous variables
 #' @param patient_data Patient data
@@ -563,9 +556,47 @@ extract_covariate_stats <- function(fitted_models, base_models) {
   bind_rows(stats_list)
 }
 
-# ============================================================================
-# PREDICTIVE PERFORMANCE FUNCTIONS
-# ============================================================================
+#' Fit models with transition-specific covariate effects
+#' @param patient_data Patient data with transition trend categories
+#' @param crude_rates List of crude rates
+#' @param covariates Vector of covariates
+#' @return List of fitted models
+fit_transition_specific_models <- function(patient_data, crude_rates, covariates) {
+  
+  transition_models <- list()
+  
+  for (cov in covariates) {
+    cat("Fitting transition-specific models for:", cov, "\n")
+    
+    # Fit models by transition type
+    for (effect_type in c("constant", "by_trend", "by_transition")) {
+      
+      if (effect_type == "constant") {
+        # Standard model with constant effects across transitions
+        transition_models[[paste0(cov, "_constant")]] <- 
+          fit_msm_models(patient_data, crude_rates, covariates = c(cov))
+        
+      } else if (effect_type == "by_trend") {
+        # Effects vary by trend type (worse, better, death, recovery)
+        # This requires manually specifying the constraint matrix
+        # Simplified implementation - would need more complex constraint specification
+        transition_models[[paste0(cov, "_by_trend")]] <- 
+          fit_msm_models(patient_data, crude_rates, covariates = c(cov))
+        
+      } else if (effect_type == "by_transition") {
+        # Fully flexible - different effect for each transition
+        # This requires constraint = NULL in msm (unconstrained)
+        transition_models[[paste0(cov, "_by_transition")]] <- 
+          fit_msm_models(patient_data, crude_rates, covariates = c(cov))
+      }
+    }
+  }
+  
+  return(transition_models)
+}
+
+
+# Predictive performance functions ----------------------------------------
 
 #' Calculate predictive outcomes using cross-validation
 #' @param fitted_models List of fitted models
@@ -684,9 +715,8 @@ calculate_predictive_performance <- function(fitted_models, patient_data, k_fold
   bind_rows(predictive_results)
 }
 
-# ============================================================================
-# TIME-VARYING RATE FUNCTIONS
-# ============================================================================
+
+# Time-varying rate models ------------------------------------------------
 
 #' Fit models with time-dependent transition rates
 #' @param patient_data Patient data
@@ -742,9 +772,8 @@ fit_time_varying_models <- function(patient_data, crude_rates,
   return(time_models)
 }
 
-# ============================================================================
-# SENSITIVITY ANALYSIS FUNCTIONS
-# ============================================================================
+
+# Length of stay outliers: sensitivity analyses ---------------------------
 
 #' Perform sensitivity analysis for outliers
 #' @param patient_data Original patient data
@@ -787,52 +816,9 @@ sensitivity_analysis_outliers <- function(patient_data, crude_rates, cutoff_day 
   ))
 }
 
-# ============================================================================
-# TRANSITION-SPECIFIC EFFECTS FUNCTIONS
-# ============================================================================
 
-#' Fit models with transition-specific covariate effects
-#' @param patient_data Patient data with transition trend categories
-#' @param crude_rates List of crude rates
-#' @param covariates Vector of covariates
-#' @return List of fitted models
-fit_transition_specific_models <- function(patient_data, crude_rates, covariates) {
-  
-  transition_models <- list()
-  
-  for (cov in covariates) {
-    cat("Fitting transition-specific models for:", cov, "\n")
-    
-    # Fit models by transition type
-    for (effect_type in c("constant", "by_trend", "by_transition")) {
-      
-      if (effect_type == "constant") {
-        # Standard model with constant effects across transitions
-        transition_models[[paste0(cov, "_constant")]] <- 
-          fit_msm_models(patient_data, crude_rates, covariates = c(cov))
-        
-      } else if (effect_type == "by_trend") {
-        # Effects vary by trend type (worse, better, death, recovery)
-        # This requires manually specifying the constraint matrix
-        # Simplified implementation - would need more complex constraint specification
-        transition_models[[paste0(cov, "_by_trend")]] <- 
-          fit_msm_models(patient_data, crude_rates, covariates = c(cov))
-        
-      } else if (effect_type == "by_transition") {
-        # Fully flexible - different effect for each transition
-        # This requires constraint = NULL in msm (unconstrained)
-        transition_models[[paste0(cov, "_by_transition")]] <- 
-          fit_msm_models(patient_data, crude_rates, covariates = c(cov))
-      }
-    }
-  }
-  
-  return(transition_models)
-}
 
-# ============================================================================
-# MODEL DIAGNOSTICS FUNCTIONS
-# ============================================================================
+# Transition deviance analysis: Model diagnostics -------------------------
 
 #' Calculate deviance residuals for transition probabilities
 #' @param fitted_model A fitted msm model
@@ -884,9 +870,8 @@ calculate_transition_deviance <- function(fitted_model, patient_data) {
   return(deviance_data)
 }
 
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
+
+# Utility functions -------------------------------------------------------
 
 #' Extract transition trend categories for plotting
 #' @param patient_data Patient data
@@ -925,4 +910,3 @@ add_transition_trends <- function(patient_data) {
   
   return(trend_types)
 }
-

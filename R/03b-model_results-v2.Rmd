@@ -31,8 +31,8 @@ options(knitr.kable.NA = "-")
 ```
 
 ```{r load-data, include = FALSE}
-source(here("scripts", "00-config.R"))
-source(here("scripts", "00-functions.R"))
+source(here("R", "00-config.R"))
+source(here("R", "00-functions.R"))
 
 # Load comprehensive results
 comprehensive_results <- readRDS(here("data", "temp", "comprehensive_model_results.rds"))
@@ -101,25 +101,7 @@ cat("• Most significant covariate:", best_covariate$covariate_type,
 
 # Base Model Comparison
 
-## Model Structure Overview
-
-```{r base-model-overview}
-base_model_summary <- same_structure_comparisons$base_models %>%
-  select(model, converged, AIC, BIC, n_params, delta_AIC) %>%
-  arrange(AIC)
-
-base_model_summary %>%
-  mutate(
-    AIC = round(AIC, 1),
-    BIC = round(BIC, 1),
-    delta_AIC = round(delta_AIC, 1)
-  ) %>%
-  kable(caption = "Base Model Comparison Summary") %>%
-  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
-  row_spec(which.min(base_model_summary$AIC), bold = TRUE, color = "white", background = "darkgreen")
-```
-
-## Structural Model Comparison (DRAIC/DRLCV)
+## Model Structure Comparison (DRAIC/DRLCV)
 
 ```{r structural-comparison}
 if (!is.null(different_structure_comparisons) && nrow(different_structure_comparisons) > 0) {
@@ -134,6 +116,8 @@ if (!is.null(different_structure_comparisons) && nrow(different_structure_compar
   cat("Structural model comparisons not available or failed to compute.")
 }
 ```
+
+Positive values for these criteria indicate the coarse model is preferred, while negative values indicate the full model is preferred.
 
 # Covariate Analysis
 
@@ -169,8 +153,7 @@ significant_covariates <- covariate_stats %>%
     significant = lrt_pval < 0.05,
     highly_significant = lrt_pval < 0.001
   ) %>%
-  arrange(lrt_pval) %>%
-  slice_head(n = 20)  # Top 20 most significant
+  arrange(lrt_pval)
 
 significant_covariates %>%
   select(covariate_type, model, delta_AIC, delta_BIC, lrt_stat, lrt_pval) %>%
@@ -192,18 +175,16 @@ continuous_comparison <- covariate_stats %>%
   filter(str_detect(covariate_type, "age|BMI|cci_score|COVID_vax_doses")) %>%
   separate(covariate_type, c("covariate", "type"), sep = "_", extra = "merge") %>%
   filter(type %in% c("linear", "spline"), converged == TRUE) %>%
-  select(covariate, type, model, AIC, BIC, lrt_pval) %>%
-  pivot_wider(names_from = type, values_from = c(AIC, BIC, lrt_pval), names_sep = "_") %>%
+  select(covariate, type, model, AIC, lrt_pval) %>%
+  pivot_wider(names_from = type, values_from = c(AIC, lrt_pval), names_sep = "_") %>%
   mutate(
     delta_AIC_spline_vs_linear = AIC_spline - AIC_linear,
-    delta_BIC_spline_vs_linear = BIC_spline - BIC_linear,
-    prefer_spline_AIC = delta_AIC_spline_vs_linear < -2,
-    prefer_spline_BIC = delta_BIC_spline_vs_linear < -2
+    prefer_spline_AIC = delta_AIC_spline_vs_linear < -2
   )
 
 continuous_comparison %>%
-  select(covariate, model, delta_AIC_spline_vs_linear, delta_BIC_spline_vs_linear, 
-         prefer_spline_AIC, prefer_spline_BIC) %>%
+  select(covariate, model, delta_AIC_spline_vs_linear, 
+         prefer_spline_AIC, lrt_pval_linear, lrt_pval_spline) %>%
   mutate(across(starts_with("delta"), ~round(.x, 1))) %>%
   kable(caption = "Linear vs. Spline Model Comparison for Continuous Variables") %>%
   kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
@@ -249,7 +230,7 @@ time_varying_stats %>%
   filter(!is.na(lrt_pval)) %>%
   mutate(across(c(delta_AIC, delta_BIC, lrt_stat), ~round(.x, 2))) %>%
   mutate(lrt_pval = ifelse(lrt_pval < 0.001, "<0.001", round(lrt_pval, 3))) %>%
-  arrange(lrt_pval) %>%
+  # arrange(lrt_pval) %>%
   kable(caption = "Time-Varying Rate Model Comparison") %>%
   kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
 ```

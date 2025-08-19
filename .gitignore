@@ -4,6 +4,9 @@ abstract/
 idea-dump/
 data/
 figs/
+literature/
+analysis-plan/
+slide-decks/
 
 # Ignore everything starting with an underscore
 _*

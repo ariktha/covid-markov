@@ -1,0 +1,618 @@
+---
+title: "Comprehensive Multi-State Model Analysis: Enhanced Results pt 2"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    code_folding: show
+    theme: flatly
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup}
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 8)
+
+rm(list = ls())
+
+library(here)
+library(tidyverse)
+library(msm)
+library(splines)
+library(furrr)
+```
+
+```{r load functions and data}
+
+source(here("R", "00-config.R"))
+source(here("R", "00-functions.R"))  # Original + enhanced functions
+source(here("R", "00-functions-pt2.R"))
+
+pt_stg <- readRDS(here("data", "temp", "pt_stg.rds"))
+dem_raw <- readRDS(here("data", "pt_demographics.rds"))
+
+fitted_base_models <- readRDS(here("data", "temp", "models.rds"))
+qmat_list <- readRDS(here("data", "temp", "mod_qmat_list.rds"))
+crude_rates <- readRDS(here("data", "temp", "mod_crude_rates.rds"))
+
+# Define covariates for analysis
+time_invariant_covariates <- c("age", "sex", "race", "cci_score", "COVID_vax")
+continuous_covariates <- c("age", "cci_score")
+
+```
+
+```{r model-comparison}
+
+base_comparison <- compare_same_structure_models(
+  fitted_models = fitted_base_models,
+  reference_model = "base_model"
+)
+
+print(base_comparison)
+
+# Best model by AIC
+best_base_model <- base_comparison %>%
+  filter(converged == TRUE) %>%
+  arrange(AIC) %>%
+  slice(1) %>%
+  pull(model)
+
+cat("Best base model:", best_base_model, "\n\n")
+
+```
+
+```{r continuous covariate non-linearity}
+
+# Test non-linear relationships for continuous variables
+nonlinear_results <- list()
+
+for (cov in continuous_covariates) {
+  cat("Testing non-linearity for", cov, "...\n")
+  
+  model_data <- pt_stg %>% filter(model == best_base_model)
+  
+  nonlinear_test <- test_nonlinear_relationship(
+    patient_data = model_data,
+    crude_rates = list(crude_rates[[best_base_model]]),
+    covariate = cov,
+    knots = 4
+  )
+  
+  nonlinear_results[[cov]] <- nonlinear_test
+  
+  # Print results
+  if (!is.null(nonlinear_test$comparison)) {
+    comp_result <- nonlinear_test$comparison
+    cat("  Linear AIC:", round(comp_result$linear_AIC, 1), 
+        "| Spline AIC:", round(comp_result$spline_AIC, 1),
+        "| Prefer spline:", comp_result$prefer_spline, "\n")
+  }
+}
+
+```
+
+```{r multivariate-model-selection}
+
+model_data <- pt_stg %>% filter(model == best_base_model)
+
+multivariate_models <- multivariate_selection(
+  patient_data = model_data,
+  crude_rates = setNames(list(crude_rates[[best_base_model]]), best_base_model),
+  covariates = time_invariant_covariates,
+  method = "forward",
+  alpha_enter = 0.05
+)
+
+if (!is.null(multivariate_models[[best_base_model]])) {
+  selected_vars <- multivariate_models[[best_base_model]]$selected_covariates
+  cat("Selected variables:", paste(selected_vars, collapse = ", "), "\n")
+  cat("Final AIC:", round(multivariate_models[[best_base_model]]$final_aic, 1), "\n\n")
+}
+
+```
+
+```{r time-varying-effects}
+
+# Test time-varying effects
+time_varying_models <- fit_time_varying_models(
+  patient_data = model_data,
+  crude_rates = setNames(list(crude_rates[[best_base_model]]), best_base_model),
+  time_covariates = c("linear", "spline")
+)
+
+# Compare to base model
+time_comparison <- extract_covariate_stats(
+  time_varying_models, 
+  setNames(list(fitted_base_models[[best_base_model]]), best_base_model)
+)
+
+significant_time_effects <- time_comparison %>%
+  filter(!is.na(lrt_pval), lrt_pval < 0.05)
+
+if (nrow(significant_time_effects) > 0) {
+  cat("Significant time-varying effects detected!\n")
+  cat("This suggests violation of Markov assumption\n")
+  print(significant_time_effects[, c("covariate_type", "delta_AIC", "lrt_pval")])
+} else {
+  cat("No significant time-varying effects - Markov assumption supported\n")
+}
+
+```
+
+```{r predictive-performance}
+
+# Combine models for comparison
+all_models_for_prediction <- c(
+  setNames(list(fitted_base_models[[best_base_model]]), best_base_model),
+  time_varying_models
+)
+
+# Calculate predictive performance (simplified version)
+predictive_results <- calculate_predictive_performance(
+  fitted_models = all_models_for_prediction,
+  patient_data = model_data,
+  k_folds = 3  # Reduced for demonstration
+)
+
+if (!is.null(predictive_results) && nrow(predictive_results) > 0) {
+  cat("Predictive performance results:\n")
+  print(predictive_results)
+} else {
+  cat("Predictive performance assessment failed\n")
+}
+
+```
+
+```{r model-diagnostics}
+
+```
+
+# ============================================================================
+# STEP 6: MODEL DIAGNOSTICS
+# ============================================================================
+
+cat("STEP 6: Performing model diagnostics...\n")
+
+best_fitted_model <- fitted_base_models[[best_base_model]]
+
+# Goodness of fit test
+gof_test <- goodness_of_fit_test(best_fitted_model, model_data)
+
+cat("Goodness of fit test:\n")
+cat("Chi-square statistic:", round(gof_test$chi_square, 2), "\n")
+cat("Degrees of freedom:", gof_test$df, "\n")
+cat("P-value:", round(gof_test$p_value, 4), "\n")
+
+if (gof_test$p_value < 0.05) {
+  cat("Model shows significant lack of fit (p < 0.05)\n")
+} else {
+  cat("Model shows adequate fit (p >= 0.05)\n")
+}
+
+cat("\n")
+
+# ============================================================================
+# STEP 7: CLINICAL RISK CALCULATOR
+# ============================================================================
+
+cat("STEP 7: Creating clinical risk calculator...\n")
+
+# Create risk calculator from best model
+risk_calculator <- create_risk_calculator(
+  fitted_model = best_fitted_model,
+  prediction_times = c(1, 3, 7, 14)
+)
+
+# Example patient risk calculation
+example_patient <- list(
+  age = 65,
+  sex = "Male",
+  cci_score = 3,
+  COVID_vax = "Yes"
+)
+
+cat("Example risk calculation for patient:\n")
+cat("Age:", example_patient$age, "| Sex:", example_patient$sex, 
+    "| CCI:", example_patient$cci_score, "| Vaccinated:", example_patient$COVID_vax, "\n")
+
+example_risks <- risk_calculator(
+  patient_covariates = example_patient,
+  current_state = "M"  # Currently in moderate state
+)
+
+if (!is.null(example_risks$predictions)) {
+  risk_summary <- example_risks$predictions %>%
+    select(time_horizon, prob_death, prob_recovery, death_risk_category) %>%
+    mutate(across(starts_with("prob_"), ~round(.x, 3)))
+  
+  print(risk_summary)
+}
+
+cat("\n")
+
+# ============================================================================
+# STEP 8: VISUALIZATION EXAMPLES
+# ============================================================================
+
+cat("STEP 8: Creating visualizations...\n")
+
+# Transition diagram
+transition_plot <- plot_transition_diagram(
+  qmatrix = qmatrix.msm(best_fitted_model, ci = "none"),
+  model_name = best_base_model
+)
+
+# Save plot
+ggsave(here("output", "transition_diagram.png"), transition_plot, 
+       width = 10, height = 8, dpi = 300)
+
+# Survival curves
+survival_plot <- plot_survival_curves(
+  fitted_model = best_fitted_model,
+  times = seq(0, 30, 1),
+  covariates = list(
+    "Low risk" = list(age = 45, cci_score = 0),
+    "High risk" = list(age = 75, cci_score = 5)
+  )
+)
+
+# Save plot
+ggsave(here("output", "survival_curves.png"), survival_plot,
+       width = 12, height = 8, dpi = 300)
+
+cat("Plots saved to output/ directory\n")
+
+# ============================================================================
+# STEP 9: BOOTSTRAP CONFIDENCE INTERVALS
+# ============================================================================
+
+cat("STEP 9: Calculating bootstrap confidence intervals...\n")
+
+# Bootstrap CIs (reduced iterations for demonstration)
+bootstrap_results <- bootstrap_ci(
+  fitted_model = best_fitted_model,
+  patient_data = model_data,
+  n_bootstrap = 50,  # Reduced for demonstration
+  confidence_level = 0.95
+)
+
+if (!is.null(bootstrap_results)) {
+  cat("Bootstrap results (top 5 parameters):\n")
+  top_bootstrap <- bootstrap_results %>%
+    arrange(desc(abs(bias))) %>%
+    slice_head(n = 5) %>%
+    select(parameter, original_estimate, mean_estimate, bias, lower_ci, upper_ci)
+  
+  print(top_bootstrap)
+} else {
+  cat("Bootstrap analysis failed\n")
+}
+
+cat("\n")
+
+# ============================================================================
+# STEP 10: COMPREHENSIVE SUMMARY
+# ============================================================================
+
+cat("STEP 10: Final summary...\n")
+
+# Create comprehensive model summary
+model_summary <- create_model_summary_table(
+  model_list = fitted_base_models,
+  include_metrics = c("AIC", "BIC", "logLik")
+)
+
+# Add AIC weights
+model_summary$aic_weight <- calculate_aic_weights(model_summary$AIC)
+
+cat("FINAL MODEL COMPARISON:\n")
+final_summary <- model_summary %>%
+  arrange(AIC) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  select(model, converged, AIC, BIC, aic_weight)
+
+print(final_summary)
+
+# Key findings summary
+cat("\n=== KEY FINDINGS SUMMARY ===\n")
+cat("• Best model structure:", best_base_model, "\n")
+cat("• Model converged:", model_summary$converged[model_summary$model == best_base_model], "\n")
+cat("• AIC weight:", round(model_summary$aic_weight[model_summary$model == best_base_model], 3), "\n")
+
+if (exists("selected_vars") && length(selected_vars) > 0) {
+  cat("• Important covariates:", paste(selected_vars, collapse = ", "), "\n")
+}
+
+cat("• Time-varying effects:", ifelse(nrow(significant_time_effects) > 0, "Detected", "Not detected"), "\n")
+
+if (!is.null(gof_test)) {
+  cat("• Model fit adequacy:", ifelse(gof_test$p_value >= 0.05, "Adequate", "Poor"), "\n")
+}
+
+cat("• Analysis completed successfully!\n")
+
+# ============================================================================
+# SAVE COMPREHENSIVE RESULTS
+# ============================================================================
+
+comprehensive_analysis_results <- list(
+  base_model_comparison = base_comparison,
+  best_base_model = best_base_model,
+  nonlinear_tests = nonlinear_results,
+  multivariate_selection = multivariate_models,
+  time_varying_comparison = time_comparison,
+  predictive_performance = predictive_results,
+  goodness_of_fit = gof_test,
+  bootstrap_ci = bootstrap_results,
+  model_summary = model_summary,
+  risk_calculator = risk_calculator,
+  analysis_metadata = list(
+    analysis_date = Sys.Date(),
+    r_version = R.version.string,
+    msm_version = packageVersion("msm"),
+    n_patients = length(unique(model_data$deid_enc_id)),
+    n_observations = nrow(model_data),
+    covariates_tested = time_invariant_covariates,
+    continuous_covariates = continuous_covariates,
+    best_model = best_base_model,
+    convergence_issues = sum(!model_summary$converged, na.rm = TRUE)
+  )
+)
+
+# Save results
+saveRDS(comprehensive_analysis_results, here("data", "temp", "comprehensive_analysis_complete.rds"))
+
+cat("\n=== ANALYSIS COMPLETE ===\n")
+cat("Comprehensive results saved to: data/temp/comprehensive_analysis_complete.rds\n")
+cat("Plots saved to: output/ directory\n")
+cat("\nThis analysis demonstrates:\n")
+cat("1. ✓ Base model structure comparison\n")
+cat("2. ✓ Non-linear relationship testing\n") 
+cat("3. ✓ Multivariate model selection\n")
+cat("4. ✓ Time-varying effects assessment\n")
+cat("5. ✓ Predictive performance evaluation\n")
+cat("6. ✓ Model diagnostic testing\n")
+cat("7. ✓ Clinical risk calculator creation\n")
+cat("8. ✓ Advanced visualizations\n")
+cat("9. ✓ Bootstrap confidence intervals\n")
+cat("10. ✓ Comprehensive reporting\n")
+
+# ============================================================================
+# ADDITIONAL EXAMPLES AND UTILITIES
+# ============================================================================
+
+# Example: Extract hazard ratios for significant covariates
+if (exists("selected_vars") && length(selected_vars) > 0 && 
+    !is.null(multivariate_models[[best_base_model]]$model)) {
+  
+  cat("\n=== HAZARD RATIO EXAMPLES ===\n")
+  
+  final_multivariate_model <- multivariate_models[[best_base_model]]$model
+  
+  for (var in selected_vars) {
+    if (var %in% continuous_covariates) {
+      # For continuous variables, compare 1 SD increase
+      hr_result <- extract_hazard_ratios(
+        fitted_model = final_multivariate_model,
+        covariate_name = var,
+        reference_value = 0,
+        comparison_value = 1  # Represents 1-unit increase
+      )
+    } else {
+      # For categorical variables, compare levels
+      hr_result <- extract_hazard_ratios(
+        fitted_model = final_multivariate_model,
+        covariate_name = var,
+        reference_value = 0,
+        comparison_value = 1
+      )
+    }
+    
+    if (!is.null(hr_result)) {
+      cat("Hazard ratios for", var, ":\n")
+      hr_summary <- hr_result %>%
+        select(transition, estimate, lower, upper) %>%
+        mutate(
+          hr_ci = format_ci(estimate, lower, upper, digits = 2)
+        ) %>%
+        slice_head(n = 5)  # Show top 5 transitions
+      
+      print(hr_summary)
+      cat("\n")
+    }
+  }
+}
+
+# Example: Simulation-based validation
+cat("=== SIMULATION VALIDATION EXAMPLE ===\n")
+
+# Simulate trajectories from best model
+simulated_data <- simulate_trajectories(
+  fitted_model = best_fitted_model,
+  n_patients = 100,
+  max_time = 30,
+  start_state = "M"
+)
+
+if (!is.null(simulated_data)) {
+  # Compare simulated vs observed outcomes
+  sim_outcomes <- simulated_data %>%
+    group_by(patient_id) %>%
+    summarise(
+      max_time = max(time),
+      final_state = last(state),
+      ever_severe = any(str_detect(state, "S")),
+      died = any(state == "D"),
+      recovered = any(state == "R")
+    )
+  
+  # Observed outcomes from real data
+  obs_outcomes <- model_data %>%
+    group_by(deid_enc_id) %>%
+    summarise(
+      max_time = max(DaysSinceEntry),
+      final_state = last(state),
+      ever_severe = any(str_detect(state, "S")),
+      died = any(state == "D"), 
+      recovered = any(state == "R")
+    )
+  
+  cat("Simulation validation results:\n")
+  cat("Simulated death rate:", round(mean(sim_outcomes$died) * 100, 1), "%\n")
+  cat("Observed death rate:", round(mean(obs_outcomes$died) * 100, 1), "%\n")
+  cat("Simulated severe rate:", round(mean(sim_outcomes$ever_severe) * 100, 1), "%\n")
+  cat("Observed severe rate:", round(mean(obs_outcomes$ever_severe) * 100, 1), "%\n")
+  
+  # Simple validation metric
+  death_rate_diff <- abs(mean(sim_outcomes$died) - mean(obs_outcomes$died))
+  severe_rate_diff <- abs(mean(sim_outcomes$ever_severe) - mean(obs_outcomes$ever_severe))
+  
+  cat("Death rate difference:", round(death_rate_diff * 100, 2), "%\n")
+  cat("Severe rate difference:", round(severe_rate_diff * 100, 2), "%\n")
+  
+  if (death_rate_diff < 0.05 && severe_rate_diff < 0.05) {
+    cat("✓ Simulation validation: GOOD (differences < 5%)\n")
+  } else {
+    cat("⚠ Simulation validation: NEEDS ATTENTION (differences > 5%)\n")
+  }
+} else {
+  cat("Simulation failed - check model specification\n")
+}
+
+cat("\n")
+
+# Example: Create clinical decision support summary
+cat("=== CLINICAL DECISION SUPPORT SUMMARY ===\n")
+
+# Key transition probabilities for clinical decision making
+key_transitions <- pmatrix.msm(best_fitted_model, t = 7)  # 7-day probabilities
+
+if (!is.null(key_transitions)) {
+  # Extract clinically relevant probabilities
+  if ("M" %in% rownames(key_transitions)) {
+    m_to_outcomes <- key_transitions["M", ]
+    cat("For patients currently in MODERATE state, 7-day probabilities:\n")
+    cat("• Progression to severe:", round(sum(m_to_outcomes[grepl("S", names(m_to_outcomes))]) * 100, 1), "%\n")
+    cat("• Death:", round((m_to_outcomes["D"] %||% 0) * 100, 1), "%\n")
+    cat("• Recovery:", round((m_to_outcomes["R"] %||% 0) * 100, 1), "%\n")
+    cat("• Remain moderate/stable:", round((m_to_outcomes["M"] %||% 0) * 100, 1), "%\n")
+  }
+  
+  if ("S" %in% rownames(key_transitions)) {
+    s_to_outcomes <- key_transitions["S", ]
+    cat("\nFor patients currently in SEVERE state, 7-day probabilities:\n")
+    cat("• Death:", round((s_to_outcomes["D"] %||% 0) * 100, 1), "%\n")
+    cat("• Recovery:", round((s_to_outcomes["R"] %||% 0) * 100, 1), "%\n")
+    cat("• Improvement to moderate:", round(sum(s_to_outcomes[grepl("M", names(s_to_outcomes))]) * 100, 1), "%\n")
+    cat("• Remain severe:", round((s_to_outcomes["S"] %||% 0) * 100, 1), "%\n")
+  }
+}
+
+# Expected length of stay calculations
+sojourn_times <- sojourn.msm(best_fitted_model)
+if (!is.null(sojourn_times)) {
+  cat("\nExpected time in each state before transition:\n")
+  for (state in names(sojourn_times$estimates)) {
+    if (!state %in% c("D", "R")) {
+      cat("•", state, "state:", round(sojourn_times$estimates[state], 1), "days\n")
+    }
+  }
+}
+
+cat("\n")
+
+# Example: Model uncertainty quantification
+cat("=== MODEL UNCERTAINTY ASSESSMENT ===\n")
+
+# AIC-based model averaging weights
+model_weights <- calculate_aic_weights(model_summary$AIC[model_summary$converged])
+top_models <- model_summary %>%
+  filter(converged == TRUE) %>%
+  arrange(AIC) %>%
+  slice_head(n = 3)
+
+cat("Top 3 models and their weights:\n")
+for (i in 1:nrow(top_models)) {
+  cat(i, ".", top_models$model[i], "- Weight:", round(model_weights[i], 3), 
+      "(AIC:", round(top_models$AIC[i], 1), ")\n")
+}
+
+# Model selection uncertainty
+if (length(model_weights) > 1) {
+  entropy <- -sum(model_weights * log(model_weights), na.rm = TRUE)
+  max_entropy <- log(length(model_weights))
+  uncertainty_index <- entropy / max_entropy
+  
+  cat("\nModel selection uncertainty index:", round(uncertainty_index, 3), "\n")
+  if (uncertainty_index > 0.8) {
+    cat("⚠ HIGH uncertainty - multiple models have similar support\n")
+  } else if (uncertainty_index > 0.5) {
+    cat("⚠ MODERATE uncertainty - consider model averaging\n") 
+  } else {
+    cat("✓ LOW uncertainty - clear best model\n")
+  }
+}
+
+# ============================================================================
+# FINAL RECOMMENDATIONS
+# ============================================================================
+
+cat("\n=== FINAL ANALYSIS RECOMMENDATIONS ===\n")
+
+# Model selection recommendation
+cat("MODEL SELECTION:\n")
+cat("• Recommended model:", best_base_model, "\n")
+cat("• Model weight:", round(model_weights[1], 3), "indicating", 
+    ifelse(model_weights[1] > 0.7, "strong", ifelse(model_weights[1] > 0.4, "moderate", "weak")), 
+    "evidence\n")
+
+# Covariate recommendations
+if (exists("selected_vars") && length(selected_vars) > 0) {
+  cat("\nCOVARIATE EFFECTS:\n")
+  cat("• Significant predictors:", paste(selected_vars, collapse = ", "), "\n")
+  cat("• Consider these for risk stratification and clinical decision-making\n")
+}
+
+# Time-dependence recommendations
+if (nrow(significant_time_effects) > 0) {
+  cat("\nTEMPORAL EFFECTS:\n")
+  cat("• Time-varying transition rates detected\n")
+  cat("• Consider reassessing patient risk as hospitalization progresses\n")
+  cat("• Standard Markov assumption may be violated\n")
+} else {
+  cat("\nTEMPORAL EFFECTS:\n")
+  cat("• No significant time-varying effects detected\n")
+  cat("• Markov assumption appears reasonable\n")
+}
+
+# Clinical implementation recommendations  
+cat("\nCLINICAL IMPLEMENTATION:\n")
+cat("• Use risk calculator for admission triage and resource planning\n")
+cat("• Monitor high-risk transitions identified in the analysis\n")
+cat("• Expected sojourn times can guide discharge planning\n")
+
+if (!is.null(gof_test) && gof_test$p_value < 0.05) {
+  cat("• ⚠ Model shows some lack of fit - validate predictions carefully\n")
+} else {
+  cat("• ✓ Model shows adequate statistical fit\n")
+}
+
+# Future research recommendations
+cat("\nFUTURE RESEARCH:\n")
+cat("• Validate model on external dataset\n")
+cat("• Incorporate real-time biomarkers if available\n") 
+cat("• Consider semi-Markov models if time-dependence is important\n")
+cat("• Develop automated risk scoring system\n")
+
+cat("\n=== ANALYSIS WORKFLOW COMPLETE ===\n")
+cat("All enhanced MSM analysis functions have been demonstrated.\n")
+cat("Adapt this workflow for your specific research questions and data.\n")
+
+# Clean up large objects to save memory
+rm(simulated_data, example_risks)
+invisible(gc())
