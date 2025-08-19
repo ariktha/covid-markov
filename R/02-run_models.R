@@ -12,6 +12,9 @@ dem_raw <- readRDS(here("data", "pt_demographics.rds"))
 stg_raw <- readRDS(here("data", "pt_enc_staging.rds"))
 model_specs_raw <- read_csv(here("data", "model-specs.csv"))
 
+
+# Data prep ---------------------------------------------------------------
+
 model_specs <- model_specs_raw %>%
   mutate(stage = strsplit(as.character(stage), ", ")) %>% 
   unnest(stage) %>%
@@ -98,7 +101,7 @@ crude_rate <- calc_crude_init_rates(pt_stg, qmat_list)
 saveRDS(qmat_list, here("data", "temp", "mod_qmat_list.rds"))
 saveRDS(crude_rate, here("data", "temp", "mod_crude_rates.rds"))
 
-# Fit the models
+# Fit base models --------------------------------------------------------
 
 fitted_base_models <- fit_msm_models(pt_stg, crude_rate)
 tidied_base_results <- tidy_msm_models(fitted_base_models)

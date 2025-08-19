@@ -512,7 +512,7 @@ if (!is.null(best_model_obj)) {
   sojourn_times <- sojourn.msm(best_model_obj)
   
   sojourn_df <- data.frame(
-    State = names(sojourn_times$estimates),
+    State = rownames(sojourn_times),
     Mean_Days = round(sojourn_times$estimates, 2),
     Lower_CI = round(sojourn_times$L, 2),
     Upper_CI = round(sojourn_times$U, 2)
@@ -539,7 +539,7 @@ if (!is.null(best_model_obj)) {
 
 # Risk Stratification Implications
 
-```{r risk-stratification}
+```{r risk-stratification, eval = FALSE}
 # Identify high-risk transitions and patient characteristics
 if (!is.null(top_covariates) && nrow(top_covariates) > 0) {
   cat("## High-Risk Patient Identification\n\n")
@@ -572,7 +572,7 @@ if (!is.null(top_covariates) && nrow(top_covariates) > 0) {
 
 # Model Limitations and Future Directions
 
-```{r limitations}
+```{r limitations, eval = FALSE}
 cat("## Current Analysis Limitations\n\n")
 
 # Calculate convergence rates
@@ -608,7 +608,7 @@ cat("• **Covariate Measurement:** Time-varying covariates not fully incorporat
 cat("• **Selection Bias:** Analysis limited to hospitalized patients\n")
 ```
 
-# Technical Appendix
+# Appendix
 
 ## Model Specifications
 
@@ -627,7 +627,7 @@ for (model_name in names(qmat_list)) {
 
 ## Computational Details
 
-```{r computational-details}
+```{r computational-details, eval = FALSE}
 cat("### Analysis Environment\n\n")
 cat("• R version:", R.version.string, "\n")
 cat("• msm package version:", packageVersion("msm"), "\n")
@@ -647,10 +647,3 @@ if (!is.null(different_structure_comparisons)) {
 }
 ```
 
----
-
-*Report generated on `r Sys.Date()` using R `r R.version.string`*
-
-**Contact:** For questions about this analysis, please contact the analysis team.
-
-**Reproducibility:** All code and intermediate results are saved in the `data/temp/` directory. The comprehensive results object contains all fitted models and can be used to reproduce any part of this analysis.

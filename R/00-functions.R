@@ -37,14 +37,29 @@ calc_crude_init_rates <- function(patient_data, qmat_list) {
   return(crude_results)
 }
 
-fit_msm_models <- function(patient_data, crude_rates, covariates = NULL) {
+fit_msm_models <- function(patient_data, crude_rates, covariates = NULL, 
+                           spline_vars = NULL, spline_df = 3, method = "optim") {
   fitted_models <- list()
   
-  # Create formula string for covariates if provided
-  covariate_formula <- if (!is.null(covariates)) {
-    paste("~", paste(covariates, collapse = " + "))
-  } else {
-    NULL
+  # Create formula string for covariates
+  covariate_formula <- NULL
+  if (!is.null(covariates) || !is.null(spline_vars)) {
+    formula_terms <- c()
+    
+    # Add regular covariates
+    if (!is.null(covariates)) {
+      formula_terms <- c(formula_terms, covariates)
+    }
+    
+    # Add spline terms
+    if (!is.null(spline_vars)) {
+      spline_terms <- paste0("splines::ns(", spline_vars, ", df = ", spline_df, ")")
+      formula_terms <- c(formula_terms, spline_terms)
+    }
+    
+    if (length(formula_terms) > 0) {
+      covariate_formula <- paste("~", paste(formula_terms, collapse = " + "))
+    }
   }
   
   for (modelname in unique(patient_data$model)) {
@@ -60,11 +75,12 @@ fit_msm_models <- function(patient_data, crude_rates, covariates = NULL) {
       if (!is.null(covariate_formula)) {
         msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, 
             qmatrix = crude_result$qmat, covariates = as.formula(covariate_formula),
-            control = list(fnscale = 10000, maxit = 1000)
+            control = list(fnscale = 10000, maxit = 1000), method = method
         )
       } else {
         msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, 
-            qmatrix = crude_result$qmat, control = list(fnscale = 10000, maxit = 1000)
+            qmatrix = crude_result$qmat, control = list(fnscale = 10000, maxit = 1000),
+            method = method
         )
       }
     }, error = function(e) {
@@ -80,34 +96,99 @@ fit_msm_models <- function(patient_data, crude_rates, covariates = NULL) {
   return(fitted_models)
 }
 
-tidy_msm_models <- function(fitted_msm_models) {
+tidy_msm_models <- function(fitted_msm_models, covariate_name = NA) {
   tidied_models <- data.frame()
-  for (modelname in names(fitted_msm_models)) {
-    fitted_model <- fitted_msm_models[[modelname]]
-    
-    if (is.null(fitted_model)) {
-      warning(paste("Skipping tidying for", modelname, "- model is NULL"))
-      next
+  
+  # Handle nested structure (univariate covariate models)
+  if (any(sapply(fitted_msm_models, function(x) is.list(x) && !inherits(x, "msm")))) {
+    # This is a nested structure from univariate covariate fitting
+    for (covariate in names(fitted_msm_models)) {
+      for (modelname in names(fitted_msm_models[[covariate]])) {
+        fitted_model <- fitted_msm_models[[covariate]][[modelname]]
+        if (is.null(fitted_model)) {
+          warning(paste("Skipping tidying for", covariate, modelname, "- model is NULL"))
+          next
+        }
+        
+        model_tidy <- tryCatch({
+          # Calculate model fit statistics
+          loglik <- fitted_model$minus2loglik / -2
+          aic <- fitted_model$minus2loglik + 2 * length(fitted_model$estimates)
+          bic <- calc_bic_msm(fitted_model)
+          n_params <- length(fitted_model$estimates)
+          n_obs <- fitted_model$N
+          
+          tidy_result <- tidy(fitted_model) %>%
+            mutate(
+              model = modelname,
+              covariate = covariate,
+              loglik = loglik,
+              AIC = aic,
+              BIC = bic,
+              n_params = n_params,
+              n_obs = n_obs,
+              has_covariates = !is.null(fitted_model$covariates),
+              n_covariates = ifelse(is.null(fitted_model$covariates), 0, length(fitted_model$covariates))
+            )
+        }, error = function(e) {
+          warning(paste("Error tidying model for", covariate, modelname, ":", e$message))
+          return(NULL)
+        })
+        
+        if (!is.null(model_tidy)) {
+          tidied_models <- bind_rows(tidied_models, model_tidy)
+        }
+      }
     }
-    
-    model_tidy <- tryCatch({
-      tidy(fitted_model) %>%
-        mutate(model = modelname)  # Add the model name as a column
-    }, error = function(e) {
-      warning(paste("Error tidying model for", modelname, ":", e$message))
-      return(NULL)
-    })
-    
-    if (!is.null(model_tidy)) {
-      tidied_models <- bind_rows(tidied_models, model_tidy)
+  } else {
+    # This is a flat structure (base models or multivariate)
+    for (modelname in names(fitted_msm_models)) {
+      fitted_model <- fitted_msm_models[[modelname]]
+      
+      if (is.null(fitted_model)) {
+        warning(paste("Skipping tidying for", modelname, "- model is NULL"))
+        next
+      }
+      
+      model_tidy <- tryCatch({
+        # Calculate model fit statistics
+        loglik <- fitted_model$minus2loglik / -2
+        aic <- fitted_model$minus2loglik + 2 * length(fitted_model$estimates)
+        bic <- calc_bic_msm(fitted_model)
+        n_params <- length(fitted_model$estimates)
+        n_obs <- fitted_model$N
+        
+        tidy_result <- tidy(fitted_model) %>%
+          mutate(
+            model = modelname,
+            covariate = covariate_name,
+            loglik = loglik,
+            AIC = aic,
+            BIC = bic,
+            n_params = n_params,
+            n_obs = n_obs,
+            has_covariates = !is.null(fitted_model$covariates),
+            n_covariates = ifelse(is.null(fitted_model$covariates), 0, length(fitted_model$covariates))
+          )
+      }, error = function(e) {
+        warning(paste("Error tidying model for", modelname, ":", e$message))
+        return(NULL)
+      })
+      
+      if (!is.null(model_tidy)) {
+        tidied_models <- bind_rows(tidied_models, model_tidy)
+      }
     }
   }
   
   return(tidied_models)
 }
 
-tidy_msm_pmats <- function(fitted_msm_models, ) {
+
+tidy_msm_pmats <- function(fitted_msm_models, t_values = c(1), 
+                           covariates_list = NULL) {
   tidied_pmats <- data.frame()
+  
   for (modelname in names(fitted_msm_models)) {
     fitted_model <- fitted_msm_models[[modelname]]
     
@@ -116,23 +197,46 @@ tidy_msm_pmats <- function(fitted_msm_models, ) {
       next
     }
     
-    model_tidy <- tryCatch({
-      pmat_to_tib(pmatrix.msm(fitted_model, ci = "normal"), model = modelname, cov_name = NA, cov_value = NA)
-    }, error = function(e) {
-      warning(paste("Error tidying model for", modelname, ":", e$message))
-      return(NULL)
-    })
-    
-    if (!is.null(model_tidy)) {
-      tidied_pmats <- bind_rows(tidied_pmats, model_tidy)
+    # Handle multiple time points
+    for (t_val in t_values) {
+      # Handle multiple covariate combinations
+      if (is.null(covariates_list)) {
+        model_tidy <- tryCatch({
+          pmat_to_tib(pmatrix.msm(fitted_model, t = t_val, ci = "normal"), 
+                      model = modelname, cov_name = NA, cov_value = NA, t_value = t_val)
+        }, error = function(e) {
+          warning(paste("Error tidying pmat for", modelname, "at t =", t_val, ":", e$message))
+          return(NULL)
+        })
+        
+        if (!is.null(model_tidy)) {
+          tidied_pmats <- bind_rows(tidied_pmats, model_tidy)
+        }
+      } else {
+        # Handle covariate combinations
+        for (cov_combo in covariates_list) {
+          model_tidy <- tryCatch({
+            pmat_to_tib(pmatrix.msm(fitted_model, t = t_val, covariates = cov_combo, ci = "normal"), 
+                        model = modelname, cov_name = names(cov_combo)[1], 
+                        cov_value = cov_combo[[1]], t_value = t_val)
+          }, error = function(e) {
+            warning(paste("Error tidying pmat for", modelname, ":", e$message))
+            return(NULL)
+          })
+          
+          if (!is.null(model_tidy)) {
+            tidied_pmats <- bind_rows(tidied_pmats, model_tidy)
+          }
+        }
+      }
     }
   }
   
   return(tidied_pmats)
 }
 
-# Create function to convert P matrix to tibble
-pmat_to_tib <- function(pmatrix, model = NA, cov_name = NA, cov_value = NA) {
+
+pmat_to_tib <- function(pmatrix, model = NA, cov_name = NA, cov_value = NA, t_value = 1) {
   # Extract matrices
   est_matrix <- as.data.frame(pmatrix$estimates)
   L_matrix <- as.data.frame(pmatrix$L)
@@ -167,114 +271,13 @@ pmat_to_tib <- function(pmatrix, model = NA, cov_name = NA, cov_value = NA) {
     mutate(
       model = model,
       cov_name = cov_name,
-      cov_value = cov_value
+      cov_value = cov_value,
+      t_value = t_value
     )
   
   return(tibble_data)
 }
 
-# Parallelize this outer function
-fit_univariate_models <- function(patient_data, crude_rates, covariates) {
-  # Parallel processing of covariates
-  univariate_models <- mclapply(covariates, function(cov) {
-    # Fit model with single covariate
-    models <- fit_msm_models(patient_data, crude_rates, covariates = c(cov))
-    return(models)
-  }, mc.cores = n.cores)
-  
-  # Name the list elements
-  names(univariate_models) <- covariates
-  
-  return(univariate_models)
-}
-
-tidy_msm_models_univ <- function(fitted_msm_models) {
-  tidied_models <- data.frame()
-  
-  # Handle nested structure from fit_univariate_models
-  for (covariate in names(fitted_msm_models)) {
-    for (modelname in names(fitted_msm_models[[covariate]])) {
-      fitted_model <- fitted_msm_models[[covariate]][[modelname]]
-      if (is.null(fitted_model)) {
-        warning(paste("Skipping tidying for", covariate, modelname, "- model is NULL"))
-        next
-      }
-      
-      model_tidy <- tryCatch({
-        tidy(fitted_model) %>%
-          mutate(
-            model = modelname,
-            covariate = covariate
-          )
-      }, error = function(e) {
-        warning(paste("Error tidying model for", covariate, modelname, ":", e$message))
-        return(NULL)
-      })
-      
-      if (!is.null(model_tidy)) {
-        tidied_models <- bind_rows(tidied_models, model_tidy)
-      }
-    }
-  }
-  return(tidied_models)
-}
-
-tidy_msm_pmats_univ <- function(fitted_msm_models, cov_value) {
-  tidied_pmats <- data.frame()
-  for (covariate in names(fitted_msm_models)) {
-    for (modelname in names(fitted_msm_models[[covariate]])) {
-      fitted_model <- fitted_msm_models[[covariate]][[modelname]]
-      if (is.null(fitted_model)) {
-        warning(paste("Skipping tidying for", covariate, modelname, "- model is NULL"))
-        next
-      }
-      
-      model_tidy <- tryCatch({
-        pmat_to_tib(pmatrix.msm(fitted_model, ci = "normal"), model = modelname, cov_name = covariate, cov_value = cov_value)
-      }, error = function(e) {
-        warning(paste("Error tidying model for", modelname, ":", e$message))
-        return(NULL)
-      })
-      
-      if (!is.null(model_tidy)) {
-        tidied_pmats <- bind_rows(tidied_pmats, model_tidy)
-      }
-    }
-  }
-  return(tidied_pmats)
-}
-
-tidy_msm_hr_univ <- function(fitted_msm_models, hr_scale = 1) {
-  tidied_pmats <- data.frame()
-  for (covariate in names(fitted_msm_models)) {
-    for (modelname in names(fitted_msm_models[[covariate]])) {
-      fitted_model <- fitted_msm_models[[covariate]][[modelname]]
-      if (is.null(fitted_model)) {
-        warning(paste("Skipping tidying for", covariate, modelname, "- model is NULL"))
-        next
-      }
-      
-      model_tidy <- tryCatch({
-        model_tidy <- as.data.frame(hazard.msm(fitted_model, hazard.scale = 10, cl = 0.95)) %>%
-          rename_with(~ sub("^[^.]*\\.(.*)$", "\\1", .x), .cols = everything()) %>% 
-          rownames_to_column(var = "transition") %>%
-          mutate(
-            model = modelname,
-            covariate = covariate,
-            hr_scale = hr_scale
-          )
-      }, error = function(e) {
-        warning(paste("Error tidying model for", modelname, ":", e$message))
-        return(NULL)
-      })
-      
-      if (!is.null(model_tidy)) {
-        tidied_pmats <- bind_rows(tidied_pmats, model_tidy)
-      }
-    }
-  }
-  return(tidied_pmats)
-}
 
 # Covariate functions -----------------------------------------------------
 
