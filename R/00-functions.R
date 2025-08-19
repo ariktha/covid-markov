@@ -925,4 +925,3 @@ add_transition_trends <- function(patient_data) {
   
   return(trend_types)
 }
-
