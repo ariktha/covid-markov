@@ -4,8 +4,8 @@ library(here)
 library(tidyverse)
 library(msm)
 
-source(here("scripts", "00-config.R"))
-source(here("scripts", "00-functions.R"))
+source(here("R", "00-config.R"))
+source(here("R", "00-functions.R"))
 
 # Load data
 dem_raw <- readRDS(here("data", "pt_demographics.rds"))
@@ -96,14 +96,14 @@ qmat_list <- list(
                                   c("M", "MS", "S", "D", "R")))
 )
 
-crude_rate <- calc_crude_init_rates(pt_stg, qmat_list)
+crude_rates <- calc_crude_init_rates(pt_stg, qmat_list)
 
 saveRDS(qmat_list, here("data", "temp", "mod_qmat_list.rds"))
-saveRDS(crude_rate, here("data", "temp", "mod_crude_rates.rds"))
+saveRDS(crude_rates, here("data", "temp", "mod_crude_rates.rds"))
 
 # Fit base models --------------------------------------------------------
 
-fitted_base_models <- fit_msm_models(pt_stg, crude_rate)
+fitted_base_models <- fit_msm_models(pt_stg, crude_rates)
 tidied_base_results <- tidy_msm_models(fitted_base_models)
 tidied_base_pmats <- tidy_msm_pmats(fitted_base_models)
 
@@ -174,7 +174,7 @@ saveRDS(transition_stats, here("data", "temp", "transition_stats.rds"))
 
 ## Multivariable model with forward selection -----------------------------
 
-model_data <- pt_stg %>% filter(model == "base_model")
+model_data <- pt_stg_enhanced %>% filter(model == "base_model")
 
 multivariate_models <- multivariate_selection(
   patient_data = model_data,
@@ -190,25 +190,67 @@ if (!is.null(multivariate_models[[best_base_model]])) {
   cat("Final AIC:", round(multivariate_models[[best_base_model]]$final_aic, 1), "\n\n")
 }
 
+# Extract statistics for multivariate models
+
+multivariate_stats <- extract_covariate_stats(multivariate_models, fitted_base_models[["base_model"]])
+
 # Save multivariate model results
 
 saveRDS(multivariate_models, here("data", "temp", "multivariate_models.rds"))
+saveRDS(multivariate_stats, here("data", "temp", "multivariate_stats.rds"))
 
 # Time-varying models -----------------------------------------------------
 
-# Fit models with time-dependent transition rates
-time_varying_models <- fit_time_varying_models(
-  patient_data = pt_stg_enhanced,
-  crude_rates = crude_rates,
+model_data <- add_calendar_time(model_data)
+
+# Fit models with hospital time-dependent transition rates
+hosp_time_varying_models <- fit_time_varying_models(
+  patient_data = model_data,
+  crude_rates = setNames(list(crude_rates[["base_model"]]), "base_model"),
+  time_term = "days_since_entry",
   time_covariates = c("linear", "spline", "piecewise")
 )
 
-# Compare time-varying models to base models
-time_varying_stats <- extract_covariate_stats(time_varying_models, fitted_base_models)
+# Fit models with calendar time-dependent transition rates
+hosp_time_varying_models <- fit_time_varying_models(
+  patient_data = model_data,
+  crude_rates = setNames(list(crude_rates[["base_model"]]), "base_model"),
+  time_term = "calendar_time",
+  time_covariates = c("linear", "spline", "piecewise")
+)
+
+# Compare hospital time-varying models to base models
+hosp_time_varying_stats <- extract_covariate_stats(hosp_time_varying_models, fitted_base_models[["base_model"]])
+
+# Compare calendar time-varying models to base models
+cal_time_varying_stats <- extract_covariate_stats(cal_time_varying_models, fitted_base_models[["base_model"]])
 
 # Save results
-saveRDS(time_varying_models, here("data", "temp", "time_varying_models.rds"))
-saveRDS(time_varying_stats, here("data", "temp", "time_varying_stats.rds"))
+saveRDS(hosp_time_varying_models, here("data", "temp", "hosp_time_varying_models.rds"))
+saveRDS(hosp_time_varying_stats, here("data", "temp", "hosp_time_varying_stats.rds"))
+
+saveRDS(cal_time_varying_models, here("data", "temp", "cal_time_varying_models.rds"))
+saveRDS(cal_time_varying_stats, here("data", "temp", "cal_time_varying_stats.rds"))
+
+
+# Markovian assumption ----------------------------------------------------
+
+# Add time in severe as a time-varying covariate to base_model
+
+sev_time_mod <- fit_msm_models(
+  patient_data = pt_stg_enhanced,
+  crude_rates = setNames(list(crude_rates[["base_model"]]), "base_model"),
+  covariates = c("hx_sev_time")
+)
+
+# Extract statistics for severe time model
+
+sev_time_stats <- extract_covariate_stats(sev_time_mod, fitted_base_models[["base_model"]])
+
+# Save results
+
+saveRDS(sev_time_mod, here("data", "temp", "sev_time_model.rds"))
+saveRDS(sev_time_stats, here("data", "temp", "sev_time_stats.rds"))
 
 # Sensitivity analysis for long-stay patients ----------------------------
 

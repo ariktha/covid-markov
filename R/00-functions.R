@@ -10,6 +10,30 @@ tbl_fn <- function(x){
   res
 }
 
+calc_bic_msm <- function(fitted_model) {
+  if (is.null(fitted_model)) {
+    return(NA_real_)
+  }
+  
+  # Check if minus2loglik is valid
+  if (!is.finite(fitted_model$minus2loglik)) {
+    return(NA_real_)
+  }
+  
+  # Get number of parameters
+  n_params <- length(fitted_model$estimates)
+  if (n_params <= 0) {
+    return(NA_real_)
+  }
+  
+  # Get sample size - MSM models store this in different places
+  n_obs <- length(unique(fitted_model[["data"]][["mf"]][["(subject)"]]))
+  
+  bic <- fitted_model$minus2loglik + n_params * log(n_obs)
+  
+  return(bic)
+}
+
 calc_crude_init_rates <- function(patient_data, qmat_list) {
   
   crude_results <- list()
@@ -38,7 +62,7 @@ calc_crude_init_rates <- function(patient_data, qmat_list) {
 }
 
 fit_msm_models <- function(patient_data, crude_rates, covariates = NULL, 
-                           spline_vars = NULL, spline_df = 3, method = "optim") {
+                           spline_vars = NULL, spline_df = 3) {
   fitted_models <- list()
   
   # Create formula string for covariates
@@ -71,22 +95,60 @@ fit_msm_models <- function(patient_data, crude_rates, covariates = NULL,
       next
     }
     
-    fitted_model <- tryCatch({
-      if (!is.null(covariate_formula)) {
-        msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, 
-            qmatrix = crude_result$qmat, covariates = as.formula(covariate_formula),
-            control = list(fnscale = 10000, maxit = 1000), method = method
-        )
+    # Try different optimization methods if convergence fails
+    optimization_methods <- list(
+      list(opt_method = "optim", method = "BFGS", name = "BFGS"),
+      list(opt_method = "bobyqa", method = NULL, name = "BOBYQA"),
+      list(opt_method = "optim", method = "Nelder-Mead", name = "Nelder-Mead")
+    )
+    
+    fitted_model <- NULL
+    
+    for (opt_config in optimization_methods) {
+      fitted_model <- tryCatch({
+        # Base control parameters
+        control_list <- list(fnscale = 10000, maxit = 5000, reltol = 1e-10)
+        
+        # Only add method to control if using optim
+        if (opt_config$opt_method == "optim" && !is.null(opt_config$method)) {
+          control_list$method <- opt_config$method
+        }
+        
+        if (!is.null(covariate_formula)) {
+          msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, 
+              qmatrix = crude_result$qmat, covariates = as.formula(covariate_formula),
+              opt.method = opt_config$opt_method, control = control_list
+          )
+        } else {
+          msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, 
+              qmatrix = crude_result$qmat, opt.method = opt_config$opt_method, 
+              control = control_list
+          )
+        }
+      }, error = function(e) {
+        return(NULL)
+      })
+      
+      # Check if model fitted successfully and converged
+      if (!is.null(fitted_model)) {
+        converged <- is.null(fitted_model$opt$convergence) || fitted_model$opt$convergence == 0
+        
+        if (converged) {
+          message(paste("Model", modelname, "converged successfully using", opt_config$name))
+          break
+        } else {
+          message(paste("Model", modelname, "failed to converge with", opt_config$name, "- trying next method"))
+          fitted_model <- NULL  # Reset for next iteration
+        }
       } else {
-        msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, 
-            qmatrix = crude_result$qmat, control = list(fnscale = 10000, maxit = 1000),
-            method = method
-        )
+        message(paste("Model", modelname, "failed to fit with", opt_config$name, "- trying next method"))
       }
-    }, error = function(e) {
-      warning(paste("Error fitting msm for", modelname, ":", e$message))
-      return(NULL)
-    })
+    }
+    
+    # If all methods failed, issue warning
+    if (is.null(fitted_model)) {
+      warning(paste("All optimization methods failed for", modelname))
+    }
     
     if (!is.null(fitted_model)) {
       fitted_models[[modelname]] <- fitted_model
@@ -116,7 +178,7 @@ tidy_msm_models <- function(fitted_msm_models, covariate_name = NA) {
           aic <- fitted_model$minus2loglik + 2 * length(fitted_model$estimates)
           bic <- calc_bic_msm(fitted_model)
           n_params <- length(fitted_model$estimates)
-          n_obs <- fitted_model$N
+          n_obs <- length(unique(fitted_model[["data"]][["mf"]][["(subject)"]]))
           
           tidy_result <- tidy(fitted_model) %>%
             mutate(
@@ -156,7 +218,7 @@ tidy_msm_models <- function(fitted_msm_models, covariate_name = NA) {
         aic <- fitted_model$minus2loglik + 2 * length(fitted_model$estimates)
         bic <- calc_bic_msm(fitted_model)
         n_params <- length(fitted_model$estimates)
-        n_obs <- fitted_model$N
+        n_obs <- length(unique(fitted_model[["data"]][["mf"]][["(subject)"]]))
         
         tidy_result <- tidy(fitted_model) %>%
           mutate(
@@ -1025,17 +1087,36 @@ predict_patient_outcomes <- function(fitted_model, new_data, prediction_time = 1
 #' @param time_covariates Vector of time covariate specifications
 #' @return List of fitted models
 fit_time_varying_models <- function(patient_data, crude_rates, 
-                                    time_covariates = c("linear", "spline", "piecewise")) {
+                                    time_covariates = c("linear", "spline", "piecewise"),
+                                    time_term = "days_since_entry") {
+  
+  # Validate time_term parameter
+  if (!time_term %in% c("days_since_entry", "calendar_time")) {
+    stop("time_term must be either 'days_since_entry' or 'calendar_time'")
+  }
+  
+  # Select the appropriate time variable
+  if (time_term == "days_since_entry") {
+    time_var <- "DaysSinceEntry"
+    if (!time_var %in% names(patient_data)) {
+      stop("DaysSinceEntry column not found in patient_data")
+    }
+  } else {
+    time_var <- "CalendarTime"
+    if (!time_var %in% names(patient_data)) {
+      stop("CalendarTime column not found in patient_data. Please run add_calendar_time() first.")
+    }
+  }
   
   time_models <- list()
   
   for (time_type in time_covariates) {
-    cat("Fitting", time_type, "time-varying models\n")
+    cat("Fitting", time_type, "time-varying models using", time_term, "\n")
     
     if (time_type == "linear") {
       # Linear time trend
-      time_models[[paste0("time_", time_type)]] <- 
-        fit_msm_models(patient_data, crude_rates, covariates = "DaysSinceEntry")
+      time_models[[paste0("time_", time_type, "_", time_term)]] <- 
+        fit_msm_models(patient_data, crude_rates, covariates = time_var)
       
     } else if (time_type == "spline") {
       # Spline time trend
@@ -1044,9 +1125,9 @@ fit_time_varying_models <- function(patient_data, crude_rates,
         nest() %>%
         mutate(
           data = map(data, function(df) {
-            max_time <- max(df$DaysSinceEntry, na.rm = TRUE)
+            max_time <- max(df[[time_var]], na.rm = TRUE)
             if (max_time > 5) {  # Only if sufficient follow-up
-              spline_basis <- as.data.frame(ns(df$DaysSinceEntry, df = 3))
+              spline_basis <- as.data.frame(ns(df[[time_var]], df = 3))
               names(spline_basis) <- paste0("time_spline_", seq_len(ncol(spline_basis)))
               bind_cols(df, spline_basis)
             } else {
@@ -1056,21 +1137,46 @@ fit_time_varying_models <- function(patient_data, crude_rates,
         ) %>%
         unnest(data)
       
-      time_models[[paste0("time_", time_type)]] <- 
+      time_models[[paste0("time_", time_type, "_", time_term)]] <- 
         fit_msm_models(patient_data_time, crude_rates, 
                        covariates = paste0("time_spline_", 1:3))
       
     } else if (time_type == "piecewise") {
       # Piecewise constant (early vs late)
-      patient_data_piece <- patient_data %>%
-        mutate(time_period = ifelse(DaysSinceEntry <= 7, "early", "late"))
+      # Adjust breakpoint based on time_term
+      if (time_term == "days_since_entry") {
+        breakpoint <- 7  # 7 days since entry
+      } else {
+        # For calendar time, you might want a different breakpoint
+        # This could be adjusted based on your specific needs
+        breakpoint <- 7  # 7 days from first date in dataset
+      }
       
-      time_models[[paste0("time_", time_type)]] <- 
+      patient_data_piece <- patient_data %>%
+        mutate(time_period = ifelse(.data[[time_var]] <= breakpoint, "early", "late"))
+      
+      time_models[[paste0("time_", time_type, "_", time_term)]] <- 
         fit_msm_models(patient_data_piece, crude_rates, covariates = "time_period")
     }
   }
   
   return(time_models)
+}
+
+# Function to add calendar time column to patient data
+add_calendar_time <- function(patient_data) {
+  # Convert Date column to actual dates if it's not already
+  if (!inherits(patient_data$Date, "Date")) {
+    patient_data$Date <- as.Date(patient_data$Date)
+  }
+  
+  # Find the first date in the dataset
+  first_date <- min(patient_data$Date, na.rm = TRUE)
+  
+  # Add CalendarTime column (sequential days from first date)
+  patient_data$CalendarTime <- as.numeric(patient_data$Date - first_date) + 1
+  
+  return(patient_data)
 }
 
 
@@ -1303,6 +1409,253 @@ create_model_summary_table <- function(model_list, include_metrics = c("AIC", "B
   return(summary_table)
 }
 
+transition_tables_by_covariate <- function(data, covariate_name, state_var = "state", 
+                                           subject_var = "deid_enc_id", time_var = "DaysSinceEntry",
+                                           n_categories = 3, method = "quantile") {
+  
+  # Check if covariate is continuous
+  is_continuous <- is.numeric(data[[covariate_name]]) && 
+    length(unique(data[[covariate_name]][!is.na(data[[covariate_name]])])) > 10
+  
+  # Handle continuous variables
+  if (is_continuous) {
+    cat("Continuous covariate detected. Categorizing into", n_categories, "groups using", method, "method.\n")
+    
+    # Create working copy of data
+    data_work <- data
+    
+    if (method == "quantile") {
+      # Quantile-based categorization
+      breaks <- quantile(data_work[[covariate_name]], 
+                         probs = seq(0, 1, length.out = n_categories + 1), 
+                         na.rm = TRUE)
+      # Ensure unique breaks
+      breaks <- unique(breaks)
+      if (length(breaks) <= n_categories) {
+        warning("Not enough unique values to create requested number of categories. Using available breaks.")
+      }
+      
+      labels <- paste0("Q", 1:(length(breaks)-1))
+      data_work$covariate_cat <- cut(data_work[[covariate_name]], 
+                                     breaks = breaks, 
+                                     include.lowest = TRUE,
+                                     labels = labels)
+      
+      # Store break information for interpretation
+      break_info <- data.frame(
+        Category = labels,
+        Min = breaks[-length(breaks)],
+        Max = breaks[-1]
+      )
+      
+    } else if (method == "equal_width") {
+      # Equal width intervals
+      min_val <- min(data_work[[covariate_name]], na.rm = TRUE)
+      max_val <- max(data_work[[covariate_name]], na.rm = TRUE)
+      width <- (max_val - min_val) / n_categories
+      
+      breaks <- seq(min_val, max_val, by = width)
+      if (length(breaks) != (n_categories + 1)) {
+        breaks[length(breaks)] <- max_val  # Ensure max value is included
+      }
+      
+      labels <- paste0("Grp", 1:n_categories)
+      data_work$covariate_cat <- cut(data_work[[covariate_name]], 
+                                     breaks = breaks, 
+                                     include.lowest = TRUE,
+                                     labels = labels)
+      
+      break_info <- data.frame(
+        Category = labels,
+        Min = breaks[-length(breaks)],
+        Max = breaks[-1]
+      )
+      
+    } else if (method == "equal_freq") {
+      # Equal frequency (approximately equal n in each group)
+      data_work$covariate_cat <- as.factor(
+        ntile(data_work[[covariate_name]], n_categories)
+      )
+      levels(data_work$covariate_cat) <- paste0("Grp", 1:n_categories)
+      
+      # Calculate actual ranges for each group
+      break_info <- data_work %>%
+        filter(!is.na(covariate_cat) & !is.na(!!sym(covariate_name))) %>%
+        group_by(covariate_cat) %>%
+        summarise(
+          Min = min(!!sym(covariate_name), na.rm = TRUE),
+          Max = max(!!sym(covariate_name), na.rm = TRUE),
+          n = n(),
+          .groups = 'drop'
+        ) %>%
+        rename(Category = covariate_cat)
+    }
+    
+    # Use categorized variable
+    covariate_values <- levels(data_work$covariate_cat)
+    working_covariate <- "covariate_cat"
+    
+  } else {
+    # Handle categorical variables as before
+    data_work <- data
+    covariate_values <- unique(data_work[[covariate_name]])
+    covariate_values <- covariate_values[!is.na(covariate_values)]
+    working_covariate <- covariate_name
+    break_info <- NULL
+  }
+  
+  transition_tables <- list()
+  
+  for (value in covariate_values) {
+    # Subset data
+    subset_data <- data_work[data_work[[working_covariate]] == value & 
+                               !is.na(data_work[[working_covariate]]), ]
+    
+    if (nrow(subset_data) > 0) {
+      # Create transition pairs
+      transitions <- subset_data %>%
+        arrange(!!sym(subject_var), !!sym(time_var)) %>%
+        group_by(!!sym(subject_var)) %>%
+        mutate(
+          next_state = lead(!!sym(state_var)),
+          transition = paste(!!sym(state_var), "->", next_state)
+        ) %>%
+        filter(!is.na(next_state)) %>%
+        ungroup()
+      
+      # Count transitions
+      transition_counts <- table(transitions$transition)
+      
+      # Calculate transition matrix for this group
+      from_states <- sapply(strsplit(names(transition_counts), " -> "), `[`, 1)
+      to_states <- sapply(strsplit(names(transition_counts), " -> "), `[`, 2)
+      
+      all_states <- sort(unique(c(from_states, to_states)))
+      transition_matrix <- matrix(0, nrow = length(all_states), ncol = length(all_states))
+      rownames(transition_matrix) <- all_states
+      colnames(transition_matrix) <- all_states
+      
+      for (i in seq_along(transition_counts)) {
+        from <- from_states[i]
+        to <- to_states[i]
+        transition_matrix[from, to] <- transition_counts[i]
+      }
+      
+      transition_tables[[paste0(covariate_name, "_", value)]] <- list(
+        covariate_value = value,
+        transitions = transition_counts,
+        transition_matrix = transition_matrix,
+        n_transitions = sum(transition_counts),
+        n_subjects = length(unique(subset_data[[subject_var]])),
+        n_observations = nrow(subset_data)
+      )
+    }
+  }
+  
+  # Add metadata for continuous variables
+  if (is_continuous) {
+    attr(transition_tables, "continuous_info") <- list(
+      original_variable = covariate_name,
+      method = method,
+      n_categories = n_categories,
+      break_info = break_info
+    )
+    attr(transition_tables, "is_continuous") <- TRUE
+  } else {
+    attr(transition_tables, "is_continuous") <- FALSE
+  }
+  
+  return(transition_tables)
+}
+
+print_transition_tables <- function(transition_tables_list) {
+  
+  # Check if this involves continuous variables
+  is_continuous <- attr(transition_tables_list, "is_continuous")
+  
+  if (is_continuous) {
+    continuous_info <- attr(transition_tables_list, "continuous_info")
+    cat("\n=== CONTINUOUS VARIABLE ANALYSIS ===\n")
+    cat("Original variable:", continuous_info$original_variable, "\n")
+    cat("Categorization method:", continuous_info$method, "\n")
+    cat("Number of categories:", continuous_info$n_categories, "\n\n")
+    
+    cat("Category definitions:\n")
+    print(continuous_info$break_info)
+    cat("\n")
+  }
+  
+  for (name in names(transition_tables_list)) {
+    cat("\n=== Transition Table for", name, "===\n")
+    cat("Covariate value:", transition_tables_list[[name]]$covariate_value, "\n")
+    cat("Number of subjects:", transition_tables_list[[name]]$n_subjects, "\n")
+    cat("Number of transitions:", transition_tables_list[[name]]$n_transitions, "\n")
+    cat("Number of observations:", transition_tables_list[[name]]$n_observations, "\n\n")
+    
+    # Print transition counts
+    cat("Transition counts:\n")
+    print(transition_tables_list[[name]]$transitions)
+    cat("\n")
+    
+    # Print transition matrix if available
+    if ("transition_matrix" %in% names(transition_tables_list[[name]])) {
+      cat("Transition matrix (from row to column):\n")
+      print(transition_tables_list[[name]]$transition_matrix)
+      cat("\n")
+      
+      # Print transition rates
+      transition_matrix <- transition_tables_list[[name]]$transition_matrix
+      row_sums <- rowSums(transition_matrix)
+      rate_matrix <- sweep(transition_matrix, 1, row_sums, FUN = "/")
+      rate_matrix[is.nan(rate_matrix)] <- 0  # Handle division by zero
+      
+      cat("Transition proportions (from row to column):\n")
+      print(round(rate_matrix, 3))
+    }
+    
+    cat("\n", rep("=", 60), "\n")
+  }
+}
+
+summarize_continuous_transitions <- function(transition_tables_list) {
+  
+  if (!attr(transition_tables_list, "is_continuous")) {
+    stop("This function is only for continuous variable analyses")
+  }
+  
+  continuous_info <- attr(transition_tables_list, "continuous_info")
+  
+  # Extract summary statistics for each category
+  summary_df <- data.frame(
+    Category = character(),
+    N_Subjects = integer(),
+    N_Transitions = integer(),
+    N_Observations = integer(),
+    Transition_Rate = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (i in seq_along(transition_tables_list)) {
+    table_info <- transition_tables_list[[i]]
+    
+    summary_df <- rbind(summary_df, data.frame(
+      Category = table_info$covariate_value,
+      N_Subjects = table_info$n_subjects,
+      N_Transitions = table_info$n_transitions,
+      N_Observations = table_info$n_observations,
+      Transition_Rate = table_info$n_transitions / table_info$n_observations,
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  # Add range information if available
+  if ("break_info" %in% names(continuous_info)) {
+    break_info <- continuous_info$break_info
+    summary_df <- merge(summary_df, break_info, by = "Category", all.x = TRUE)
+  }
+  
+  return(summary_df)
+}
 
 # Plotting functions ------------------------------------------------------
 
