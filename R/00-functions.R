@@ -246,6 +246,78 @@ tidy_msm_models <- function(fitted_msm_models, covariate_name = NA) {
   return(tidied_models)
 }
 
+## Sojourn times -------------------------------------------------------
+
+tidy_msm_sojourns <- function(fitted_msm_models, covariates_list = NULL) {
+  tidied_sojourns <- data.frame()
+  
+  for (modelname in names(fitted_msm_models)) {
+    fitted_model <- fitted_msm_models[[modelname]]
+    
+    if (is.null(fitted_model)) {
+      warning(paste("Skipping tidying for", modelname, "- model is NULL"))
+      next
+    }
+    
+    # Handle multiple covariate combinations
+    if (is.null(covariates_list)) {
+      model_tidy <- tryCatch({
+        sojourn_to_tib(sojourn.msm(fitted_model), model = modelname, 
+                       cov_name = NA, cov_value = NA)
+      }, error = function(e) {
+        warning(paste("Error tidying sojourns for", modelname, ":", e$message))
+        return(NULL)
+      })
+      
+      if (!is.null(model_tidy)) {
+        tidied_sojourns <- bind_rows(tidied_sojourns, model_tidy)
+      }
+    } else {
+      # Handle covariate combinations
+      for (cov_combo in covariates_list) {
+        model_tidy <- tryCatch({
+          sojourn_to_tib(sojourn.msm(fitted_model, covariates = cov_combo), 
+                         model = modelname, 
+                         cov_name = names(cov_combo)[1], 
+                         cov_value = cov_combo[[1]])
+        }, error = function(e) {
+          warning(paste("Error tidying sojourns for", modelname, ":", e$message))
+          return(NULL)
+        })
+        
+        if (!is.null(model_tidy)) {
+          tidied_sojourns <- bind_rows(tidied_sojourns, model_tidy)
+        }
+      }
+    }
+  }
+  
+  return(tidied_sojourns)
+}
+
+sojourn_to_tib <- function(sojourn_obj, model = NA, cov_name = NA, cov_value = NA) {
+  sojourn_df <- as.data.frame(sojourn_obj)
+  sojourn_df <- sojourn_df %>%
+    rownames_to_column(var = "state") %>%
+    rename(
+      mean_sojourn = Mean,
+      lower_ci = L,
+      upper_ci = U
+    ) %>%
+    mutate(
+      model = model,
+      cov_name = cov_name,
+      cov_value = cov_value
+    )
+  
+  return(sojourn_df)
+}
+
+## State prevalence residuals ------------------------------------------------
+
+
+
+## Tidy transition probability matrices -----------------------------------
 
 tidy_msm_pmats <- function(fitted_msm_models, t_values = c(1), 
                            covariates_list = NULL) {
@@ -339,6 +411,183 @@ pmat_to_tib <- function(pmatrix, model = NA, cov_name = NA, cov_value = NA, t_va
   
   return(tibble_data)
 }
+
+## Hazard ratios -------------------------------------------------------
+
+
+
+
+# Predictive performance functions ----------------------------------------
+
+#' Calculate predictive outcomes using cross-validation
+#' @param fitted_models List of fitted models
+#' @param patient_data Patient data
+#' @param k_folds Number of CV folds
+#' @return Data frame with predictive metrics
+calculate_predictive_performance <- function(fitted_models, patient_data, k_folds = 5) {
+  
+  # Create fold assignments
+  unique_patients <- unique(patient_data$deid_enc_id)
+  n_patients <- length(unique_patients)
+  fold_size <- ceiling(n_patients / k_folds)
+  
+  set.seed(123)  # For reproducibility
+  fold_assignments <- sample(rep(1:k_folds, length.out = n_patients))
+  names(fold_assignments) <- unique_patients
+  
+  # Add fold assignments to data
+  patient_data <- patient_data %>%
+    mutate(fold = fold_assignments[as.character(deid_enc_id)])
+  
+  predictive_results <- list()
+  
+  for (model_name in names(fitted_models)) {
+    cat("Calculating predictive performance for:", model_name, "\n")
+    
+    model_data <- patient_data %>% filter(model == model_name)
+    if (nrow(model_data) == 0) next
+    
+    fold_results <- map_dfr(1:k_folds, function(fold) {
+      # Split data
+      train_data <- model_data %>% filter(fold != !!fold)
+      test_data <- model_data %>% filter(fold == !!fold)
+      
+      if (nrow(train_data) == 0 || nrow(test_data) == 0) {
+        return(data.frame(
+          fold = fold,
+          total_los_mae = NA,
+          days_severe_mae = NA,
+          death_auc = NA,
+          severe_auc = NA
+        ))
+      }
+      
+      # Fit model on training data (simplified - would need to refit)
+      # For now, use the full model and evaluate on test data
+      mod <- fitted_models[[model_name]]
+      
+      if (is.null(mod)) {
+        return(data.frame(
+          fold = fold,
+          total_los_mae = NA,
+          days_severe_mae = NA,
+          death_auc = NA,
+          severe_auc = NA
+        ))
+      }
+      
+      # Calculate observed outcomes for test patients
+      test_outcomes <- test_data %>%
+        group_by(deid_enc_id) %>%
+        summarise(
+          total_los = max(DaysSinceEntry, na.rm = TRUE),
+          days_severe = sum(state %in% c("S", "S1", "S2"), na.rm = TRUE),
+          died = any(state == "D"),
+          ever_severe = any(state %in% c("S", "S1", "S2")),
+          .groups = "drop"
+        )
+      
+      # Predict outcomes (simplified - would use simulation)
+      # For now, calculate simple metrics
+      
+      tryCatch({
+        # Calculate mean absolute error for continuous outcomes
+        total_los_mae <- mean(abs(test_outcomes$total_los - mean(test_outcomes$total_los, na.rm = TRUE)), na.rm = TRUE)
+        days_severe_mae <- mean(abs(test_outcomes$days_severe - mean(test_outcomes$days_severe, na.rm = TRUE)), na.rm = TRUE)
+        
+        # For binary outcomes, calculate AUC (simplified)
+        death_auc <- ifelse(var(test_outcomes$died) > 0, 
+                            cor(test_outcomes$died, test_outcomes$total_los, use = "complete.obs")^2, 
+                            NA)
+        severe_auc <- ifelse(var(test_outcomes$ever_severe) > 0, 
+                             cor(test_outcomes$ever_severe, test_outcomes$total_los, use = "complete.obs")^2, 
+                             NA)
+        
+        data.frame(
+          fold = fold,
+          total_los_mae = total_los_mae,
+          days_severe_mae = days_severe_mae,
+          death_auc = death_auc,
+          severe_auc = severe_auc
+        )
+      }, error = function(e) {
+        data.frame(
+          fold = fold,
+          total_los_mae = NA,
+          days_severe_mae = NA,
+          death_auc = NA,
+          severe_auc = NA
+        )
+      })
+    })
+    
+    # Aggregate across folds
+    predictive_results[[model_name]] <- fold_results %>%
+      summarise(
+        model = model_name,
+        total_los_mae_cv = mean(total_los_mae, na.rm = TRUE),
+        days_severe_mae_cv = mean(days_severe_mae, na.rm = TRUE),
+        death_auc_cv = mean(death_auc, na.rm = TRUE),
+        severe_auc_cv = mean(severe_auc, na.rm = TRUE),
+        .groups = "drop"
+      )
+  }
+  
+  bind_rows(predictive_results)
+}
+
+# Model diagnostic functions --------------------------------------------
+
+#' Calculate deviance residuals for transition probabilities
+#' @param fitted_model A fitted msm model
+#' @param patient_data Patient data
+#' @return Data frame with observed vs predicted transition counts
+calculate_transition_deviance <- function(fitted_model, patient_data) {
+  
+  if (is.null(fitted_model)) return(NULL)
+  
+  # Get observed transition counts
+  observed_transitions <- patient_data %>%
+    arrange(deid_enc_id, DaysSinceEntry) %>%
+    group_by(deid_enc_id) %>%
+    mutate(
+      from_state = state,
+      to_state = lead(state),
+      time_diff = lead(DaysSinceEntry) - DaysSinceEntry
+    ) %>%
+    filter(!is.na(to_state)) %>%
+    ungroup() %>%
+    count(from_state, to_state, name = "observed")
+  
+  # Get expected transition probabilities
+  pmat <- pmatrix.msm(fitted_model, t = 1)
+  expected_probs <- as.data.frame(as.table(pmat)) %>%
+    rename(from_state = Var1, to_state = Var2, expected_prob = Freq)
+  
+  # Calculate total person-time at risk in each state
+  person_time <- patient_data %>%
+    filter(!state %in% c("D", "R")) %>%
+    group_by(state) %>%
+    summarise(person_days = n(), .groups = "drop") %>%
+    rename(from_state = state)
+  
+  # Combine and calculate deviance
+  deviance_data <- observed_transitions %>%
+    full_join(expected_probs, by = c("from_state", "to_state")) %>%
+    left_join(person_time, by = "from_state") %>%
+    mutate(
+      observed = replace_na(observed, 0),
+      expected_count = expected_prob * person_days,
+      deviance = ifelse(observed > 0, 
+                        2 * observed * log(observed / expected_count),
+                        0),
+      deviance = replace_na(deviance, 0)
+    ) %>%
+    filter(!is.na(expected_count), expected_count > 0)
+  
+  return(deviance_data)
+}
+
 
 
 # Covariate functions -----------------------------------------------------
@@ -501,9 +750,6 @@ fit_transition_specific_models <- function(patient_data, crude_rates, covariates
   
   return(transition_models)
 }
-
-
-# ADVANCED COVARIATE TESTING FUNCTIONS-----
 
 #' Test for non-linear relationships using restricted cubic splines
 #' @param patient_data Patient data
@@ -869,170 +1115,9 @@ compare_different_structure_models <- function(fitted_models, model_pairs, cores
 }
 
 
-# Predictive performance functions ----------------------------------------
-
-#' Calculate predictive outcomes using cross-validation
-#' @param fitted_models List of fitted models
-#' @param patient_data Patient data
-#' @param k_folds Number of CV folds
-#' @return Data frame with predictive metrics
-calculate_predictive_performance <- function(fitted_models, patient_data, k_folds = 5) {
-  
-  # Create fold assignments
-  unique_patients <- unique(patient_data$deid_enc_id)
-  n_patients <- length(unique_patients)
-  fold_size <- ceiling(n_patients / k_folds)
-  
-  set.seed(123)  # For reproducibility
-  fold_assignments <- sample(rep(1:k_folds, length.out = n_patients))
-  names(fold_assignments) <- unique_patients
-  
-  # Add fold assignments to data
-  patient_data <- patient_data %>%
-    mutate(fold = fold_assignments[as.character(deid_enc_id)])
-  
-  predictive_results <- list()
-  
-  for (model_name in names(fitted_models)) {
-    cat("Calculating predictive performance for:", model_name, "\n")
-    
-    model_data <- patient_data %>% filter(model == model_name)
-    if (nrow(model_data) == 0) next
-    
-    fold_results <- map_dfr(1:k_folds, function(fold) {
-      # Split data
-      train_data <- model_data %>% filter(fold != !!fold)
-      test_data <- model_data %>% filter(fold == !!fold)
-      
-      if (nrow(train_data) == 0 || nrow(test_data) == 0) {
-        return(data.frame(
-          fold = fold,
-          total_los_mae = NA,
-          days_severe_mae = NA,
-          death_auc = NA,
-          severe_auc = NA
-        ))
-      }
-      
-      # Fit model on training data (simplified - would need to refit)
-      # For now, use the full model and evaluate on test data
-      mod <- fitted_models[[model_name]]
-      
-      if (is.null(mod)) {
-        return(data.frame(
-          fold = fold,
-          total_los_mae = NA,
-          days_severe_mae = NA,
-          death_auc = NA,
-          severe_auc = NA
-        ))
-      }
-      
-      # Calculate observed outcomes for test patients
-      test_outcomes <- test_data %>%
-        group_by(deid_enc_id) %>%
-        summarise(
-          total_los = max(DaysSinceEntry, na.rm = TRUE),
-          days_severe = sum(state %in% c("S", "S1", "S2"), na.rm = TRUE),
-          died = any(state == "D"),
-          ever_severe = any(state %in% c("S", "S1", "S2")),
-          .groups = "drop"
-        )
-      
-      # Predict outcomes (simplified - would use simulation)
-      # For now, calculate simple metrics
-      
-      tryCatch({
-        # Calculate mean absolute error for continuous outcomes
-        total_los_mae <- mean(abs(test_outcomes$total_los - mean(test_outcomes$total_los, na.rm = TRUE)), na.rm = TRUE)
-        days_severe_mae <- mean(abs(test_outcomes$days_severe - mean(test_outcomes$days_severe, na.rm = TRUE)), na.rm = TRUE)
-        
-        # For binary outcomes, calculate AUC (simplified)
-        death_auc <- ifelse(var(test_outcomes$died) > 0, 
-                            cor(test_outcomes$died, test_outcomes$total_los, use = "complete.obs")^2, 
-                            NA)
-        severe_auc <- ifelse(var(test_outcomes$ever_severe) > 0, 
-                             cor(test_outcomes$ever_severe, test_outcomes$total_los, use = "complete.obs")^2, 
-                             NA)
-        
-        data.frame(
-          fold = fold,
-          total_los_mae = total_los_mae,
-          days_severe_mae = days_severe_mae,
-          death_auc = death_auc,
-          severe_auc = severe_auc
-        )
-      }, error = function(e) {
-        data.frame(
-          fold = fold,
-          total_los_mae = NA,
-          days_severe_mae = NA,
-          death_auc = NA,
-          severe_auc = NA
-        )
-      })
-    })
-    
-    # Aggregate across folds
-    predictive_results[[model_name]] <- fold_results %>%
-      summarise(
-        model = model_name,
-        total_los_mae_cv = mean(total_los_mae, na.rm = TRUE),
-        days_severe_mae_cv = mean(days_severe_mae, na.rm = TRUE),
-        death_auc_cv = mean(death_auc, na.rm = TRUE),
-        severe_auc_cv = mean(severe_auc, na.rm = TRUE),
-        .groups = "drop"
-      )
-  }
-  
-  bind_rows(predictive_results)
-}
 
 
 # Simulation functions ----------------------------------------------------
-
-#' Simulate patient trajectories from fitted model
-#' @param fitted_model A fitted msm model
-#' @param n_patients Number of patients to simulate
-#' @param max_time Maximum follow-up time
-#' @param start_state Starting state (default: first state)
-#' @param covariates Named list of covariate values
-#' @return Data frame with simulated trajectories
-simulate_trajectories <- function(fitted_model, n_patients = 100, max_time = 30, 
-                                  start_state = NULL, covariates = NULL) {
-  
-  if (is.null(fitted_model)) return(NULL)
-  
-  # Get model states
-  states <- fitted_model$qmodel$state.names
-  if (is.null(start_state)) start_state <- states[1]
-  
-  # Simulate trajectories
-  sim_results <- list()
-  
-  for (i in 1:n_patients) {
-    sim_traj <- tryCatch({
-      sim.msm(fitted_model, 
-              qmatrix = qmatrix.msm(fitted_model, covariates = covariates),
-              maxtime = max_time,
-              start = match(start_state, states))
-    }, error = function(e) NULL)
-    
-    if (!is.null(sim_traj)) {
-      sim_results[[i]] <- data.frame(
-        patient_id = i,
-        time = sim_traj$times,
-        state = states[sim_traj$states]
-      )
-    }
-  }
-  
-  if (length(sim_results) > 0) {
-    return(bind_rows(sim_results))
-  } else {
-    return(NULL)
-  }
-}
 
 #' Calculate outcome predictions for new patients
 #' @param fitted_model A fitted msm model
@@ -1225,57 +1310,6 @@ sensitivity_analysis_outliers <- function(patient_data, crude_rates, cutoff_day 
 
 
 
-# Transition deviance analysis: Model diagnostics -------------------------
-
-#' Calculate deviance residuals for transition probabilities
-#' @param fitted_model A fitted msm model
-#' @param patient_data Patient data
-#' @return Data frame with observed vs predicted transition counts
-calculate_transition_deviance <- function(fitted_model, patient_data) {
-  
-  if (is.null(fitted_model)) return(NULL)
-  
-  # Get observed transition counts
-  observed_transitions <- patient_data %>%
-    arrange(deid_enc_id, DaysSinceEntry) %>%
-    group_by(deid_enc_id) %>%
-    mutate(
-      from_state = state,
-      to_state = lead(state),
-      time_diff = lead(DaysSinceEntry) - DaysSinceEntry
-    ) %>%
-    filter(!is.na(to_state)) %>%
-    ungroup() %>%
-    count(from_state, to_state, name = "observed")
-  
-  # Get expected transition probabilities
-  pmat <- pmatrix.msm(fitted_model, t = 1)
-  expected_probs <- as.data.frame(as.table(pmat)) %>%
-    rename(from_state = Var1, to_state = Var2, expected_prob = Freq)
-  
-  # Calculate total person-time at risk in each state
-  person_time <- patient_data %>%
-    filter(!state %in% c("D", "R")) %>%
-    group_by(state) %>%
-    summarise(person_days = n(), .groups = "drop") %>%
-    rename(from_state = state)
-  
-  # Combine and calculate deviance
-  deviance_data <- observed_transitions %>%
-    full_join(expected_probs, by = c("from_state", "to_state")) %>%
-    left_join(person_time, by = "from_state") %>%
-    mutate(
-      observed = replace_na(observed, 0),
-      expected_count = expected_prob * person_days,
-      deviance = ifelse(observed > 0, 
-                        2 * observed * log(observed / expected_count),
-                        0),
-      deviance = replace_na(deviance, 0)
-    ) %>%
-    filter(!is.na(expected_count), expected_count > 0)
-  
-  return(deviance_data)
-}
 
 
 # Utility functions -------------------------------------------------------
@@ -1657,154 +1691,3 @@ summarize_continuous_transitions <- function(transition_tables_list) {
   return(summary_df)
 }
 
-# Plotting functions ------------------------------------------------------
-
-#' Create survival curves from multi-state model
-#' @param fitted_model A fitted msm model
-#' @param times Vector of time points
-#' @param covariates List of covariate scenarios
-#' @return ggplot object with survival curves
-plot_survival_curves <- function(fitted_model, times = seq(0, 30, 1), covariates = list()) {
-  
-  if (is.null(fitted_model)) return(NULL)
-  
-  states <- fitted_model$qmodel$state.names
-  absorbing_states <- c("D", "R")
-  
-  # If no covariates specified, use mean values
-  if (length(covariates) == 0) {
-    covariates <- list("Mean values" = NULL)
-  }
-  
-  # Calculate survival probabilities for each covariate scenario
-  survival_data <- map_dfr(names(covariates), function(scenario_name) {
-    scenario_covs <- covariates[[scenario_name]]
-    
-    scenario_probs <- map_dfr(times, function(t) {
-      if (t == 0) {
-        # Starting probabilities (assume start in first non-absorbing state)
-        start_state <- states[!states %in% absorbing_states][1]
-        probs <- setNames(rep(0, length(states)), states)
-        probs[start_state] <- 1
-      } else {
-        # Get transition probabilities
-        pmat <- tryCatch({
-          pmatrix.msm(fitted_model, t = t, covariates = scenario_covs)
-        }, error = function(e) NULL)
-        
-        if (!is.null(pmat)) {
-          start_state_idx <- which(!states %in% absorbing_states)[1]
-          probs <- pmat[start_state_idx, ]
-        } else {
-          probs <- setNames(rep(NA, length(states)), states)
-        }
-      }
-      
-      data.frame(
-        time = t,
-        scenario = scenario_name,
-        prob_alive = 1 - (probs["D"] %||% 0),
-        prob_recovered = probs["R"] %||% 0,
-        prob_hospitalized = 1 - sum(probs[absorbing_states], na.rm = TRUE)
-      )
-    })
-    
-    return(scenario_probs)
-  })
-  
-  # Create survival plot
-  survival_long <- survival_data %>%
-    pivot_longer(cols = starts_with("prob_"), names_to = "outcome", values_to = "probability") %>%
-    mutate(
-      outcome = case_when(
-        outcome == "prob_alive" ~ "Survival (alive)",
-        outcome == "prob_recovered" ~ "Recovery",
-        outcome == "prob_hospitalized" ~ "Still hospitalized"
-      )
-    )
-  
-  p <- ggplot(survival_long, aes(x = time, y = probability, color = outcome, linetype = scenario)) +
-    geom_line(size = 1) +
-    scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
-    scale_color_manual(values = c("Survival (alive)" = "darkgreen", 
-                                  "Recovery" = "blue", 
-                                  "Still hospitalized" = "orange")) +
-    labs(
-      title = "Survival and Outcome Curves",
-      x = "Time (days)",
-      y = "Probability",
-      color = "Outcome",
-      linetype = "Scenario"
-    ) +
-    theme_minimal() +
-    theme(legend.position = "bottom")
-  
-  return(p)
-}
-
-#' Create transition flow diagram
-#' @param qmatrix Transition intensity matrix
-#' @param model_name Name of the model
-#' @return ggplot object
-plot_transition_diagram <- function(qmatrix, model_name = "") {
-  
-  # Extract non-zero transitions
-  transitions <- as.data.frame(as.table(qmatrix)) %>%
-    rename(from = Var1, to = Var2, rate = Freq) %>%
-    filter(rate > 0, from != to) %>%
-    mutate(
-      rate_category = case_when(
-        rate < 0.01 ~ "Very Low",
-        rate < 0.05 ~ "Low", 
-        rate < 0.1 ~ "Moderate",
-        TRUE ~ "High"
-      )
-    )
-  
-  # Create state positions (simple layout)
-  states <- unique(c(as.character(transitions$from), as.character(transitions$to)))
-  n_states <- length(states)
-  
-  # Arrange states in a circle
-  angles <- seq(0, 2*pi, length.out = n_states + 1)[1:n_states]
-  state_positions <- data.frame(
-    state = states,
-    x = cos(angles),
-    y = sin(angles)
-  )
-  
-  # Add positions to transitions
-  transitions <- transitions %>%
-    left_join(state_positions, by = c("from" = "state")) %>%
-    rename(x_from = x, y_from = y) %>%
-    left_join(state_positions, by = c("to" = "state")) %>%
-    rename(x_to = x, y_to = y)
-  
-  # Create plot
-  p <- ggplot() +
-    # Draw transitions as arrows
-    geom_segment(data = transitions,
-                 aes(x = x_from, y = y_from, xend = x_to, yend = y_to, 
-                     color = rate_category, size = rate),
-                 arrow = arrow(length = unit(0.3, "cm"), type = "closed")) +
-    # Draw states as circles
-    geom_point(data = state_positions, aes(x = x, y = y), 
-               size = 15, color = "white", fill = "lightblue", shape = 21, stroke = 2) +
-    # Add state labels
-    geom_text(data = state_positions, aes(x = x, y = y, label = state), 
-              size = 4, fontface = "bold") +
-    # Styling
-    scale_color_manual(values = c("Very Low" = "gray70", "Low" = "steelblue", 
-                                  "Moderate" = "orange", "High" = "red")) +
-    scale_size_continuous(range = c(0.5, 2)) +
-    coord_fixed() +
-    theme_void() +
-    theme(legend.position = "bottom") +
-    labs(
-      title = paste("Transition Diagram:", model_name),
-      color = "Transition Rate",
-      size = "Rate Magnitude"
-    )
-  
-  return(p)
-}
