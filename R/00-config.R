@@ -7,6 +7,9 @@ library(naniar)
 library(purrr)
 library(glue)
 library(splines)
+library(stringr)
+library(future)
+library(future.apply)
 
 rm(list = ls())
 

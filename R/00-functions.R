@@ -41,7 +41,7 @@ fit_msm_models <- function(patient_data,
                            spline_degree = 3,
                            constraint = "default",
                            nest_name = NULL, 
-                           mc.cores = parallel::detectCores() - 1) {
+                           mc.cores = min(8, parallel::detectCores() - 1)) {
   
   # Load required packages
   if (!requireNamespace("parallel", quietly = TRUE)) {
@@ -366,6 +366,8 @@ tidy_msm_models <- function(fitted_msm_models) {
     stop("fitted_msm_models must be a list")
   }
   
+  validate_model_structure(fitted_msm_models)
+  
   # Helper function to detect spline usage and type
   detect_splines <- function(formula_str) {
     spline_info <- list(
@@ -595,6 +597,9 @@ tidy_msm_models <- function(fitted_msm_models) {
 
 tidy_msm_qmatrix <- function(fitted_msm_models, 
                              covariates_list = NULL) {
+  
+  validate_model_structure(fitted_msm_models)
+  
   tidied_qmats <- data.frame()
   
   # Loop through model structures (outer level)
@@ -611,11 +616,8 @@ tidy_msm_qmatrix <- function(fitted_msm_models,
       }
       
       # Extract the fitted model object
-      fitted_model <- if (is.list(model_entry) && !is.null(model_entry$fitted_model)) {
-        model_entry$fitted_model
-      } else {
-        model_entry  # Backwards compatibility if structure is different
-      }
+      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in tidy_msm_qmatrix")
+      if (is.null(fitted_model)) next
       
       if (is.null(fitted_model)) {
         warning(paste("Fitted model is NULL for", model_structure, formula_name))
@@ -661,6 +663,9 @@ tidy_msm_qmatrix <- function(fitted_msm_models,
 tidy_msm_pmats <- function(fitted_msm_models, 
                            t_values = c(1), 
                            covariates_list = NULL) {
+  
+  validate_model_structure(fitted_msm_models)
+  
   tidied_pmats <- data.frame()
   
   # Loop through model structures (outer level)
@@ -676,12 +681,8 @@ tidy_msm_pmats <- function(fitted_msm_models,
         next
       }
       
-      # Extract the fitted model object
-      fitted_model <- if (is.list(model_entry) && !is.null(model_entry$fitted_model)) {
-        model_entry$fitted_model
-      } else {
-        model_entry  # Backwards compatibility if structure is different
-      }
+      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in tidy_msm_qmatrix")
+      if (is.null(fitted_model)) next
       
       if (is.null(fitted_model)) {
         warning(paste("Fitted model is NULL for", model_structure, formula_name))
@@ -759,6 +760,8 @@ tidy_msm_pmats <- function(fitted_msm_models,
 
 tidy_msm_sojourns <- function(fitted_msm_models, 
                               covariates_list = NULL) {
+  
+  validate_model_structure(fitted_msm_models)
   tidied_sojourns <- data.frame()
   
   # Loop through model structures (outer level)
@@ -774,12 +777,8 @@ tidy_msm_sojourns <- function(fitted_msm_models,
         next
       }
       
-      # Extract the fitted model object
-      fitted_model <- if (is.list(model_entry) && !is.null(model_entry$fitted_model)) {
-        model_entry$fitted_model
-      } else {
-        model_entry  # Backwards compatibility if structure is different
-      }
+      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in tidy_msm_qmatrix")
+      if (is.null(fitted_model)) next
       
       if (is.null(fitted_model)) {
         warning(paste("Fitted model is NULL for", model_structure, formula_name))
@@ -855,7 +854,7 @@ tidy_msm_sojourns <- function(fitted_msm_models,
 tidy_msm_prevalences <- function(fitted_msm_models, 
                                  time_points = seq(1, 30, by = 1),
                                  covariates_list = NULL, 
-                                 mc.cores = parallel::detectCores() - 1,
+                                 mc.cores = min(8, parallel::detectCores() - 1),
                                  ci = TRUE,
                                  ci_method = "normal",
                                  use_approximation = FALSE,
@@ -869,6 +868,8 @@ tidy_msm_prevalences <- function(fitted_msm_models,
   library(future)
   library(future.apply)
   library(dplyr)
+  
+  validate_model_structure(fitted_msm_models)
   
   cat("=== MSM PREVALENCE PROCESSING ===\n")
   cat("CI:", ifelse(ci, paste("enabled (", ci_method, ")", sep = ""), "disabled"), "\n")
@@ -1069,6 +1070,14 @@ prevalence_to_tib <- function(prevalence_result, has_ci = TRUE) {
       exp_count <- expected_data[t_idx, expected_states[s_idx]]
       exp_pct <- expected_pct_data[t_idx, expected_states[s_idx]]
       
+      # Ensure consistent state naming
+      state_name <- if (is.numeric(observed_states[s_idx])) {
+        # If we have state numbers, convert to names
+        rownames(fitted_model$qmodel$qmatrix)[observed_states[s_idx]]
+      } else {
+        observed_states[s_idx]
+      }
+      
       # Handle confidence intervals
       if (has_ci_data) {
         exp_count_ll <- prevalence_result$Expected$ci[t_idx, expected_states[s_idx], 1]
@@ -1082,7 +1091,7 @@ prevalence_to_tib <- function(prevalence_result, has_ci = TRUE) {
       result_list[[length(result_list) + 1]] <- data.frame(
         time = time_points[t_idx],
         state_num = observed_states[s_idx],
-        state = expected_states[s_idx],
+        state = state_name,
         observed_count = obs_count,
         observed_percentage = obs_pct,
         expected_count = exp_count,
@@ -1170,6 +1179,8 @@ tidy_msm_prevalences_cached <- function(fitted_msm_models,
 ### Hazard ratios -----------------------------------------------------
 
 tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
+  
+  validate_model_structure(fitted_msm_models)
   tidied_hrs <- data.frame()
   
   # Loop through model structures (outer level)
@@ -1185,12 +1196,8 @@ tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
         next
       }
       
-      # Extract the fitted model object
-      fitted_model <- if (is.list(model_entry) && !is.null(model_entry$fitted_model)) {
-        model_entry$fitted_model
-      } else {
-        model_entry  # Backwards compatibility if structure is different
-      }
+      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in tidy_msm_qmatrix")
+      if (is.null(fitted_model)) next
       
       if (is.null(fitted_model)) {
         warning(paste("Fitted model is NULL for", model_structure, formula_name))
@@ -1258,7 +1265,9 @@ calculate_predictive_performance <- function(patient_data,
                                              calibration_covariates = NULL,
                                              calibration_subgroups = NULL,
                                              parallel = NULL, 
-                                             n_cores = parallel::detectCores() - 1) {
+                                             n_cores = min(8, parallel::detectCores() - 1)) {
+  
+  validate_model_structure(fitted_models)
   
   # Auto-detect parallel processing based on total number of model/formula combinations
   total_combinations <- sum(sapply(fitted_models, length))
@@ -1498,10 +1507,9 @@ cv_fold_core <- function(fold_num, fold_assignments,
   formula_key <- names(fitted_models_fold[[model_structure_name]])[1]
   model_entry <- fitted_models_fold[[model_structure_name]][[formula_key]]
   
-  fitted_model <- if (is.list(model_entry) && !is.null(model_entry$fitted_model)) {
-    model_entry$fitted_model
-  } else {
-    model_entry
+  fitted_model <- extract_fitted_model(fitted_models_fold, model_structure_name, formula_key, "in cv_fold_core")
+  if (is.null(fitted_model)) {
+    return(create_empty_fold_result(fold_num, nrow(train_data), nrow(test_data)))
   }
   
   if (is.null(fitted_model) || 
@@ -1782,8 +1790,12 @@ generate_patient_predictions <- function(patient_id, baseline_covs, initial_stat
                                          fitted_model, covariate_formula, prediction_time) {
   
   state_names <- rownames(fitted_model$qmodel$qmatrix)
-  initial_state_num <- which(state_names == initial_state)[1]
-  if (is.na(initial_state_num)) initial_state_num <- 1
+  state_mapping <- state_name_to_num(initial_state, fitted_model)
+  initial_state_num <- state_mapping[initial_state]
+  if (is.na(initial_state_num)) {
+    warning(paste("Initial state", initial_state, "not found in model, using state 1"))
+    initial_state_num <- 1
+  }
   
   tryCatch({
     pmat <- if (length(baseline_covs) > 0 && !is.null(covariate_formula)) {
@@ -2091,6 +2103,8 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
                                            residual_type = "deviance",
                                            debug = TRUE) {
   
+  validate_model_structure(fitted_msm_models)
+  
   if (debug) cat("=== DEBUG: Starting transition residuals calculation for nested models ===\n")
   
   all_residuals <- list()
@@ -2112,11 +2126,10 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
       }
       
       # Extract the fitted model object
-      fitted_model <- if (is.list(model_entry) && !is.null(model_entry$fitted_model)) {
-        model_entry$fitted_model
-      } else {
-        model_entry  # Backwards compatibility
-      }
+      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in tidy_msm_qmatrix")
+      if (is.null(fitted_model)) next
+      
+      observed_transitions <- standardize_state_columns(observed_transitions, fitted_model)
       
       if (is.null(fitted_model) || !inherits(fitted_model, "msm")) {
         if (debug) cat("Invalid model object for:", model_structure, formula_name, "\n")
@@ -2201,6 +2214,8 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
             select(-state, -tostate),  # Remove the numeric columns
           by = c("from_state", "to_state", "time_diff")
         )
+      
+      transition_residuals <- standardize_state_columns(transition_residuals, fitted_model)
       
       if (debug) {
         cat("After joining - Non-NA expected probs:", sum(!is.na(transition_residuals$expected_prob)), "/", nrow(transition_residuals), "\n")
@@ -2702,8 +2717,9 @@ forward_selection <- function(model_data, crude_rate, candidate_covariates,
   )
   
   # Extract base model object
-  base_model_obj <- extract_model_object(base_models, unique(model_data$model)[1])
-  if (is.null(base_model_obj)) {
+  model_name <- unique(model_data$model)[1]
+  formula_key <- names(base_models[[model_name]])[1]
+  base_model_obj <- extract_fitted_model(base_models, model_name, formula_key, "in forward_selection base")  if (is.null(base_model_obj)) {
     warning("Base model failed to fit")
     return(NULL)
   }
@@ -2732,8 +2748,7 @@ forward_selection <- function(model_data, crude_rate, candidate_covariates,
         covariates = list("test" = test_covariates)
       )
       
-      test_model_obj <- extract_model_object(test_models, unique(model_data$model)[1])
-      
+      test_model_obj <- extract_fitted_model(test_models, model_name, formula_key, "in forward_selection test")      
       if (!is.null(test_model_obj)) {
         test_aic <- AIC(test_model_obj)
         
@@ -3129,6 +3144,8 @@ test_time_varying_covariate_effects <- function(patient_data, crude_rates, covar
 compare_within_structure <- function(fitted_models, model_structure = NULL, 
                                      reference_formula = "~ 1", use_tidy_models = TRUE) {
   
+  validate_model_structure(fitted_models)
+  
   # If no specific structure provided, do this for all structures
   if (is.null(model_structure)) {
     all_comparisons <- map_dfr(names(fitted_models), function(struct) {
@@ -3227,7 +3244,7 @@ compare_within_structure <- function(fitted_models, model_structure = NULL,
   } else {
     # Manual extraction (fallback)
     warning("Manual extraction not fully implemented - using tidy_msm_models")
-    return(compare_within_structure(fitted_models, model_structure, reference_formula, TRUE))
+    return(compare_within_structure(fitted_models, model_structure, reference_formula, use_tidy_models = TRUE))
   }
   
   return(final_results)
@@ -3241,6 +3258,8 @@ compare_within_structure <- function(fitted_models, model_structure = NULL,
 #' @return Data frame with cross-structure comparison metrics
 compare_across_structures <- function(fitted_models, model_pairs = NULL, 
                                       methods = c("draic", "drlcv"), cores = 1) {
+  
+  validate_model_structure(fitted_models)
   
   # If no model pairs specified, create all pairwise comparisons
   if (is.null(model_pairs)) {
@@ -3278,23 +3297,13 @@ compare_across_structures <- function(fitted_models, model_pairs = NULL,
   
   comparison_results <- model_pairs %>%
     mutate(
-      # Extract model objects
+      
       model1_obj = map2(model1_struct, formula1, function(struct, form) {
-        model_entry <- fitted_models[[struct]][[form]]
-        if (is.list(model_entry) && !is.null(model_entry$fitted_model)) {
-          model_entry$fitted_model
-        } else {
-          model_entry
-        }
+        extract_fitted_model(fitted_models, struct, form, "in compare_across_structures model1")
       }),
       
-      model2_obj = map2(model2_struct, formula2, function(struct, form) {
-        model_entry <- fitted_models[[struct]][[form]]
-        if (is.list(model_entry) && !is.null(model_entry$fitted_model)) {
-          model_entry$fitted_model
-        } else {
-          model_entry
-        }
+      model2_obj = map2(model2_struct, formula1, function(struct, form) {
+        extract_fitted_model(fitted_models, struct, form, "in compare_across_structures model2")
       })
     )
   
@@ -3527,21 +3536,11 @@ compare_covariate_effects <- function(fitted_models, base_formula = "~ 1") {
       ))
     }
     
-    # Extract model objects
-    base_entry <- fitted_models[[row$model]][[base_formula]]
-    test_entry <- fitted_models[[row$model]][[row$formula]]
-    
-    base_model <- if (is.list(base_entry) && !is.null(base_entry$fitted_model)) {
-      base_entry$fitted_model
-    } else {
-      base_entry
-    }
-    
-    test_model <- if (is.list(test_entry) && !is.null(test_entry$fitted_model)) {
-      test_entry$fitted_model
-    } else {
-      test_entry
-    }
+    # Extract model objects using proper structure
+    base_model <- extract_fitted_model(fitted_models, row$model, base_formula, 
+                                       "in compare_covariate_effects base")
+    test_model <- extract_fitted_model(fitted_models, row$model, row$formula, 
+                                       "in compare_covariate_effects test")
     
     if (is.null(base_model) || is.null(test_model)) {
       return(data.frame(
@@ -3568,7 +3567,7 @@ compare_covariate_effects <- function(fitted_models, base_formula = "~ 1") {
       lrt_vs_base_pval = lrt_result[3]
     )
   })
-  
+
   # Merge with comparison results
   final_comparison <- covariate_comparison %>%
     left_join(lrt_results, by = c("model", "formula")) %>%
@@ -3622,7 +3621,7 @@ calculate_auc_safe <- function(outcome, prediction) {
 }
 
 #' Helper function to extract model object from nested structure
-extract_model_object <- function(nested_models, model_name) {
+extract_model_object_old <- function(nested_models, model_name) {
   if (is.null(nested_models) || length(nested_models) == 0) return(NULL)
   
   # Handle different nesting levels
@@ -3640,6 +3639,135 @@ extract_model_object <- function(nested_models, model_name) {
   }
   
   return(NULL)
+}
+
+extract_fitted_model <- function(fitted_models, structure, formula, context = "") {
+  if (!structure %in% names(fitted_models)) {
+    warning(paste("Structure", structure, "not found in fitted_models", context))
+    return(NULL)
+  }
+  
+  if (!formula %in% names(fitted_models[[structure]])) {
+    warning(paste("Formula", formula, "not found in structure", structure, context))
+    return(NULL)
+  }
+  
+  model_entry <- fitted_models[[structure]][[formula]]
+  
+  # Only accept the correct nested structure
+  if (!is.list(model_entry) || !"fitted_model" %in% names(model_entry)) {
+    warning(paste("Invalid model structure for", structure, formula, 
+                  "- expected fitted_models[[structure]][[formula]]$fitted_model", context))
+    return(NULL)
+  }
+  
+  # Check if model failed
+  if (!is.null(model_entry$status) && model_entry$status == "failed") {
+    warning(paste("Model failed for", structure, formula, context))
+    return(NULL)
+  }
+  
+  return(model_entry$fitted_model)
+}
+
+validate_model_structure <- function(fitted_models) {
+  for (structure in names(fitted_models)) {
+    for (formula in names(fitted_models[[structure]])) {
+      entry <- fitted_models[[structure]][[formula]]
+      
+      if (!is.list(entry)) {
+        stop(paste("Invalid structure: fitted_models[[", structure, "]][[", formula, 
+                   "]] must be a list with $fitted_model component"))
+      }
+      
+      if (!"fitted_model" %in% names(entry)) {
+        stop(paste("Missing fitted_model: fitted_models[[", structure, "]][[", formula, 
+                   "]]$fitted_model not found"))
+      }
+    }
+  }
+  return(TRUE)
+}
+
+#' Convert state names to state numbers based on model structure
+#' @param state_names Vector of state names
+#' @param fitted_model MSM model object to get state mapping from
+#' @return Named vector mapping state names to numbers
+state_name_to_num <- function(state_names, fitted_model) {
+  if (is.null(fitted_model) || !inherits(fitted_model, "msm")) {
+    warning("Invalid fitted_model provided")
+    return(setNames(seq_along(unique(state_names)), unique(state_names)))
+  }
+  
+  # Get state names from Q matrix
+  model_states <- rownames(fitted_model$qmodel$qmatrix)
+  state_mapping <- setNames(seq_along(model_states), model_states)
+  
+  # Map input states
+  result <- state_mapping[state_names]
+  names(result) <- state_names
+  
+  # Warn about unmapped states
+  unmapped <- state_names[is.na(result)]
+  if (length(unmapped) > 0) {
+    warning(paste("States not found in model:", paste(unmapped, collapse = ", ")))
+  }
+  
+  return(result)
+}
+
+#' Convert state numbers to state names
+#' @param state_nums Vector of state numbers  
+#' @param fitted_model MSM model object to get state mapping from
+#' @return Named vector mapping state numbers to names
+state_num_to_name <- function(state_nums, fitted_model) {
+  if (is.null(fitted_model) || !inherits(fitted_model, "msm")) {
+    warning("Invalid fitted_model provided")
+    return(setNames(as.character(state_nums), state_nums))
+  }
+  
+  model_states <- rownames(fitted_model$qmodel$qmatrix)
+  
+  # Validate state numbers
+  invalid_nums <- state_nums[state_nums < 1 | state_nums > length(model_states)]
+  if (length(invalid_nums) > 0) {
+    warning(paste("Invalid state numbers:", paste(invalid_nums, collapse = ", ")))
+  }
+  
+  result <- model_states[state_nums]
+  names(result) <- state_nums
+  
+  return(result)
+}
+
+#' Standardize state columns in data
+#' @param data Data frame with state information
+#' @param fitted_model MSM model object for mapping
+#' @param config MSM configuration (optional)
+#' @return Data frame with both state and state_num columns
+standardize_state_columns <- function(data, fitted_model, config = NULL) {
+  
+  # If we have state but not state_num
+  if ("state" %in% names(data) && !"state_num" %in% names(data)) {
+    state_mapping <- state_name_to_num(data$state, fitted_model)
+    data$state_num <- state_mapping[data$state]
+  }
+  
+  # If we have state_num but not state  
+  if ("state_num" %in% names(data) && !"state" %in% names(data)) {
+    state_mapping <- state_num_to_name(data$state_num, fitted_model)
+    data$state <- state_mapping[as.character(data$state_num)]
+  }
+  
+  # Validate consistency if both exist
+  if ("state" %in% names(data) && "state_num" %in% names(data)) {
+    inconsistent <- which(data$state != state_num_to_name(data$state_num, fitted_model)[as.character(data$state_num)])
+    if (length(inconsistent) > 0) {
+      warning(paste("Inconsistent state/state_num mapping in", length(inconsistent), "rows"))
+    }
+  }
+  
+  return(data)
 }
 
 # Function to add calendar time column to patient data
