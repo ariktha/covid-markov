@@ -12,6 +12,29 @@ dem_raw <- readRDS(here("data", "pt_demographics.rds"))
 stg_raw <- readRDS(here("data", "pt_enc_staging.rds"))
 model_specs_raw <- read_csv(here("data", "model-specs.csv"))
 
+# Safe execution wrapper function
+run_section_safely <- function(section_name, section_code) {
+  cat("\n=== STARTING:", section_name, "===\n")
+  start_time <- Sys.time()
+  
+  result <- tryCatch({
+    section_code()
+    duration <- round(as.numeric(Sys.time() - start_time, units = "mins"), 2)
+    cat("✓ COMPLETED:", section_name, "in", duration, "minutes\n")
+    list(status = "success", duration = duration)
+  }, error = function(e) {
+    duration <- round(as.numeric(Sys.time() - start_time, units = "mins"), 2)
+    cat("✗ ERROR in", section_name, "after", duration, "minutes:", e$message, "\n")
+    cat("Continuing with next section...\n")
+    list(status = "error", error = e$message, duration = duration)
+  })
+  
+  return(result)
+}
+
+# Initialize results log
+results_log <- list()
+
 # Data prep ---------------------------------------------------------------
 
 model_specs <- model_specs_raw %>%
@@ -156,229 +179,258 @@ config_core <- list(
 #   time_covariates = c("linear", "piecewise")
 # )
 
-cat("\n=== FITTING BASE MODELS ===\n")
-fitted_base_models <- fit_msm_models(
-  patient_data = pt_stg, 
-  crude_rates = crude_rates,
-  covariates = NULL,
-  mc.cores = n.cores
-)
-
-# Tidy base model results
-base_models_comp <- run_comprehensive_msm_analysis(
-  fitted_base_models, pt_stg, crude_rates, mc.cores = n.cores, 
-  analysis_config = config_core
-)
-
-saveRDS(fitted_base_models, here("data", "temp", "fitted_base_models.rds"))
-saveRDS(base_models_comp, here("data", "temp", "base_models_comp.rds"))
-
-gc()
+# Base models section
+results_log$base_models <- run_section_safely("FITTING BASE MODELS", function() {
+  fitted_base_models <- fit_msm_models(
+    patient_data = pt_stg, 
+    crude_rates = crude_rates,
+    covariates = NULL,
+    mc.cores = 1
+  )
+  
+  # Tidy base model results
+  base_models_comp <- run_comprehensive_msm_analysis(
+    fitted_base_models, pt_stg, crude_rates, mc.cores = n.cores, 
+    analysis_config = config_core
+  )
+  
+  saveRDS(fitted_base_models, here("data", "temp", "fitted_base_models.rds"))
+  saveRDS(base_models_comp, here("data", "temp", "base_models_comp.rds"))
+  gc()
+  
+  # Make fitted_base_models available globally
+  assign("fitted_base_models", fitted_base_models, envir = .GlobalEnv)
+  assign("base_models_comp", base_models_comp, envir = .GlobalEnv)
+})
 
 # Markov assumption testing ----------------------------------------------
 
-cat("\n=== TESTING MARKOV ASSUMPTIONS ===\n")
-
-# 1. Time in severe as covariate (duration dependence)
-markov_time_severe <- fit_msm_models(
-  patient_data = pt_stg,
-  crude_rates = crude_rates$base_model,
-  covariates = list("time_in_severe" = "hx_sev_time"),
-  mc.cores = n.cores
-)
-
-# 2. History of severe state model (already in base models as "hx_sev")
-# Extract for comparison
-hx_sev_model <- fitted_base_models[["hx_sev"]]
-
-# Comparison: base vs time-in-severe covariate vs history state
-# Create properly nested structure for Markov comparison
-markov_comparison_models <- list(
-  base_no_covariates = list(
-    "~ 1" = fitted_base_models[["base_model"]][["~ 1"]]
-  ),
-  base_with_time_severe = list(
-    "~ hx_sev_time" = markov_time_severe[["base_model"]][["~ hx_sev_time"]]
-  ),
-  history_severe_structure = list(
-    "~ 1" = fitted_base_models[["hx_sev"]][["~ 1"]]
+results_log$markov_testing <- run_section_safely("TESTING MARKOV ASSUMPTIONS", function() {
+  # Check if base models exist, if not try to load them
+  if (!exists("fitted_base_models") || is.null(fitted_base_models)) {
+    if (file.exists(here("data", "temp", "fitted_base_models.rds"))) {
+      fitted_base_models <- readRDS(here("data", "temp", "fitted_base_models.rds"))
+    } else {
+      stop("Base models not available and no saved file found")
+    }
+  }
+  
+  # 1. Time in severe as covariate (duration dependence)
+  markov_time_severe <- fit_msm_models(
+    patient_data = pt_stg,
+    crude_rates = crude_rates$base_model,
+    covariates = list("time_in_severe" = "hx_sev_time"),
+    mc.cores = n.cores
   )
-)
-
-markov_model_comp <- run_comprehensive_msm_analysis(
-  markov_comparison_models, pt_stg, list(base_model = crude_rates[["base_model"]]), 
-  mc.cores = n.cores, analysis_config = config_core
-)
-
-saveRDS(markov_time_severe, here("data", "temp", "markov_time_severe.rds"))
-saveRDS(markov_comparison_models, here("data", "temp", "markov_comparison_models.rds"))
-saveRDS(markov_model_comp, here("data", "temp", "markov_model_comp.rds"))
-
-gc()
+  
+  # 2. History of severe state model (already in base models as "hx_sev")
+  # Extract for comparison
+  hx_sev_model <- fitted_base_models[["hx_sev"]]
+  
+  # Comparison: base vs time-in-severe covariate vs history state
+  # Create properly nested structure for Markov comparison
+  markov_comparison_models <- list(
+    base_no_covariates = list(
+      "~ 1" = fitted_base_models[["base_model"]][["~ 1"]]
+    ),
+    base_with_time_severe = list(
+      "~ hx_sev_time" = markov_time_severe[["base_model"]][["~ hx_sev_time"]]
+    ),
+    history_severe_structure = list(
+      "~ 1" = fitted_base_models[["hx_sev"]][["~ 1"]]
+    )
+  )
+  
+  markov_model_comp <- run_comprehensive_msm_analysis(
+    markov_comparison_models, pt_stg, list(base_model = crude_rates[["base_model"]]), 
+    mc.cores = n.cores, analysis_config = config_core
+  )
+  
+  saveRDS(markov_time_severe, here("data", "temp", "markov_time_severe.rds"))
+  saveRDS(markov_comparison_models, here("data", "temp", "markov_comparison_models.rds"))
+  saveRDS(markov_model_comp, here("data", "temp", "markov_model_comp.rds"))
+  gc()
+  
+  # Make objects available globally
+  assign("markov_time_severe", markov_time_severe, envir = .GlobalEnv)
+  assign("markov_comparison_models", markov_comparison_models, envir = .GlobalEnv)
+  assign("markov_model_comp", markov_model_comp, envir = .GlobalEnv)
+})
 
 # Time-varying transition rates ------------------------------------------
 
-cat("\n=== FITTING TIME-VARYING MODELS ===\n")
-
-# Hospital time effects
-hospital_time_models <- fit_time_varying_models(
-  patient_data = pt_stg,
-  crude_rates = crude_rates,
-  time_term = "days_since_entry",
-  time_covariates = c("linear", "piecewise"),
-  spline_df = 3,
-  spline_type = "ns"
-)
-
-# Calendar time effects  
-calendar_time_models <- fit_time_varying_models(
-  patient_data = pt_stg,
-  crude_rates = crude_rates,
-  time_term = "calendar_time",
-  time_covariates = c("linear", "piecewise"),
-  spline_df = 3,
-  spline_type = "ns"
-)
-
-# # COVID wave periods
-# covid_waves <- list(
-#   "wave1" = c(0, 120),
-#   "wave2" = c(200, 350), 
-#   "wave3" = c(450, 600)
-# )
-# 
-# calendar_wave_models <- fit_calendar_time_models(
-#   patient_data = pt_stg,
-#   crude_rates = crude_rates,
-#   wave_periods = covid_waves
-# )
-
-# Tidy time-varying results
-hospital_time_comp <- run_comprehensive_msm_analysis(
-  hospital_time_models, pt_stg, crude_rates, mc.cores = n.cores, 
-  analysis_config = config_core
-)
-
-calendar_time_comp <- run_comprehensive_msm_analysis(
-  calendar_time_models, pt_stg, crude_rates, mc.cores = n.cores, 
-  analysis_config = config_core
-)
-
-# calendar_wave_summary <- tidy_msm_models(calendar_wave_models)
-
-# # Time model comparisons
-# time_varying_comparison <- compare_time_varying_models(
-#   c(hospital_time_models, calendar_time_models)
-# )
-
-saveRDS(hospital_time_models, here("data", "temp", "hospital_time_models.rds"))
-saveRDS(calendar_time_models, here("data", "temp", "calendar_time_models.rds"))
-# saveRDS(calendar_wave_models, here("data", "temp", "calendar_wave_models.rds"))
-saveRDS(hospital_time_comp, here("data", "temp", "hospital_time_comp.rds"))
-saveRDS(calendar_time_comp, here("data", "temp", "calendar_time_comp.rds"))
-
-gc()
+results_log$time_varying <- run_section_safely("FITTING TIME-VARYING MODELS", function() {
+  # Hospital time effects
+  hospital_time_models <- fit_time_varying_models(
+    patient_data = pt_stg,
+    crude_rates = crude_rates,
+    time_term = "days_since_entry",
+    time_covariates = c("linear", "piecewise"),
+    spline_df = 3,
+    spline_type = "ns"
+  )
+  
+  # Calendar time effects  
+  calendar_time_models <- fit_time_varying_models(
+    patient_data = pt_stg,
+    crude_rates = crude_rates,
+    time_term = "calendar_time",
+    time_covariates = c("linear", "piecewise"),
+    spline_df = 3,
+    spline_type = "ns"
+  )
+  
+  # # COVID wave periods
+  # covid_waves <- list(
+  #   "wave1" = c(0, 120),
+  #   "wave2" = c(200, 350), 
+  #   "wave3" = c(450, 600)
+  # )
+  # 
+  # calendar_wave_models <- fit_calendar_time_models(
+  #   patient_data = pt_stg,
+  #   crude_rates = crude_rates,
+  #   wave_periods = covid_waves
+  # )
+  
+  # Tidy time-varying results
+  hospital_time_comp <- run_comprehensive_msm_analysis(
+    hospital_time_models, pt_stg, crude_rates, mc.cores = n.cores, 
+    analysis_config = config_core
+  )
+  
+  calendar_time_comp <- run_comprehensive_msm_analysis(
+    calendar_time_models, pt_stg, crude_rates, mc.cores = n.cores, 
+    analysis_config = config_core
+  )
+  
+  # calendar_wave_summary <- tidy_msm_models(calendar_wave_models)
+  
+  # # Time model comparisons
+  # time_varying_comparison <- compare_time_varying_models(
+  #   c(hospital_time_models, calendar_time_models)
+  # )
+  
+  saveRDS(hospital_time_models, here("data", "temp", "hospital_time_models.rds"))
+  saveRDS(calendar_time_models, here("data", "temp", "calendar_time_models.rds"))
+  # saveRDS(calendar_wave_models, here("data", "temp", "calendar_wave_models.rds"))
+  saveRDS(hospital_time_comp, here("data", "temp", "hospital_time_comp.rds"))
+  saveRDS(calendar_time_comp, here("data", "temp", "calendar_time_comp.rds"))
+  gc()
+  
+  # Make objects available globally
+  assign("hospital_time_models", hospital_time_models, envir = .GlobalEnv)
+  assign("calendar_time_models", calendar_time_models, envir = .GlobalEnv)
+  assign("hospital_time_comp", hospital_time_comp, envir = .GlobalEnv)
+  assign("calendar_time_comp", calendar_time_comp, envir = .GlobalEnv)
+})
 
 # Covariate effects ------------------------------------------------------
 
-cat("\n=== FITTING COVARIATE MODELS ===\n")
-
-# Univariate models
-univariate_models <- fit_msm_models(
-  patient_data = pt_stg,
-  crude_rates = crude_rates,
-  covariates = setNames(as.list(key_covariates), paste0("univar_", key_covariates)),
-  mc.cores = n.cores
-)
-
-# # Spline models for continuous covariates
-# spline_models <- fit_msm_models(
-#   patient_data = pt_stg,
-#   crude_rates = crude_rates_sub,
-#   covariates = setNames(rep(list(NULL), length(continuous_covariates)), paste0("spline_", continuous_covariates)),
-#   spline_vars = setNames(as.list(continuous_covariates), paste0("spline_", continuous_covariates)),
-#   spline_df = list(default = 3),
-#   spline_type = list(default = "ns"),
-#   mc.cores = n.cores
-# )
-# 
-# # Test nonlinear relationships
-# nonlinear_tests <- map(continuous_covariates, function(cov) {
-#   test_nonlinear_relationship(
-#     patient_data = pt_stg,
-#     crude_rates = crude_rates,
-#     covariate = cov,
-#     spline_df = 3,
-#     spline_type = "ns"
-#   )
-# })
-# names(nonlinear_tests) <- continuous_covariates
-
-# Transition-specific effects
-transition_specific_models <- fit_transition_specific_models(
-  patient_data = pt_stg,
-  crude_rates = crude_rates,
-  covariates = list("age" = c("age")),
-  constraint_configs = list(
-    "constant" = "default",
-    "by_transition" = NULL
+results_log$covariate_effects <- run_section_safely("FITTING COVARIATE MODELS", function() {
+  # Univariate models
+  univariate_models <- fit_msm_models(
+    patient_data = pt_stg,
+    crude_rates = crude_rates,
+    covariates = setNames(as.list(key_covariates), paste0("univar_", key_covariates)),
+    mc.cores = n.cores
   )
-)
-
-# # Interaction models
-# interaction_models <- fit_interaction_models(
-#   patient_data = pt_stg,
-#   crude_rates = crude_rates,
-#   base_covariates = key_covariates,
-#   interaction_specs = "all_pairwise",
-#   include_main_effects = TRUE,
-#   mc.cores = n.cores
-# )
-
-# Multivariate selection (base model only for efficiency)
-base_model_data <- pt_stg %>% filter(model == "base_model")
-multivariate_models <- multivariate_selection(
-  patient_data = base_model_data,
-  crude_rates = list(base_model = crude_rates[["base_model"]]),
-  candidate_covariates = key_covariates,
-  method = "forward",
-  alpha_enter = 0.05
-)
-
-# Tidy covariate results
-univariate_comp <- run_comprehensive_msm_analysis(
-  univariate_models, pt_stg, crude_rates, mc.cores = n.cores, 
-  analysis_config = config_core
-)
-
-# spline_summary <- tidy_msm_models(spline_models)
-transition_specific_comp <- run_comprehensive_msm_analysis(
-  transition_specific_models, pt_stg, crude_rates, mc.cores = n.cores, 
-  analysis_config = config_core
-)
-
-# interaction_summary <- tidy_msm_models(interaction_models)
-
-covariate_comparison <- compare_covariate_effects(
-  c(univariate_models),
-  base_formula = "~ 1"
-)
-
-# interaction_comparison <- compare_interaction_models(interaction_models)
-
-
-saveRDS(univariate_models, here("data", "temp", "univariate_models.rds"))
-saveRDS(univariate_comp, here("data", "temp", "univariate_comp.rds"))
-# saveRDS(spline_models, here("data", "temp", "spline_models.rds"))
-saveRDS(transition_specific_models, here("data", "temp", "transition_specific_models.rds"))
-saveRDS(transition_specific_comp, here("data", "temp", "transition_specific_comp.rds"))
-# saveRDS(interaction_models, here("data", "temp", "interaction_models.rds"))
-saveRDS(multivariate_models, here("data", "temp", "multivariate_models.rds"))
-# saveRDS(nonlinear_tests, here("data", "temp", "nonlinear_tests.rds"))
-# saveRDS(covariate_comparison, here("data", "temp", "covariate_comparison.rds"))
-# saveRDS(interaction_comparison, here("data", "temp", "interaction_comparison.rds"))
-
-gc()
+  
+  # # Spline models for continuous covariates
+  # spline_models <- fit_msm_models(
+  #   patient_data = pt_stg,
+  #   crude_rates = crude_rates_sub,
+  #   covariates = setNames(rep(list(NULL), length(continuous_covariates)), paste0("spline_", continuous_covariates)),
+  #   spline_vars = setNames(as.list(continuous_covariates), paste0("spline_", continuous_covariates)),
+  #   spline_df = list(default = 3),
+  #   spline_type = list(default = "ns"),
+  #   mc.cores = n.cores
+  # )
+  # 
+  # # Test nonlinear relationships
+  # nonlinear_tests <- map(continuous_covariates, function(cov) {
+  #   test_nonlinear_relationship(
+  #     patient_data = pt_stg,
+  #     crude_rates = crude_rates,
+  #     covariate = cov,
+  #     spline_df = 3,
+  #     spline_type = "ns"
+  #   )
+  # })
+  # names(nonlinear_tests) <- continuous_covariates
+  
+  # Transition-specific effects
+  transition_specific_models <- fit_transition_specific_models(
+    patient_data = pt_stg,
+    crude_rates = crude_rates,
+    covariates = list("age" = c("age")),
+    constraint_configs = list(
+      "constant" = "default",
+      "by_transition" = NULL
+    )
+  )
+  
+  # # Interaction models
+  # interaction_models <- fit_interaction_models(
+  #   patient_data = pt_stg,
+  #   crude_rates = crude_rates,
+  #   base_covariates = key_covariates,
+  #   interaction_specs = "all_pairwise",
+  #   include_main_effects = TRUE,
+  #   mc.cores = n.cores
+  # )
+  
+  # Multivariate selection (base model only for efficiency)
+  base_model_data <- pt_stg %>% filter(model == "base_model")
+  multivariate_models <- multivariate_selection(
+    patient_data = base_model_data,
+    crude_rates = list(base_model = crude_rates[["base_model"]]),
+    candidate_covariates = key_covariates,  # Use full key_covariates instead of just c("age", "sex")
+    method = "forward",
+    alpha_enter = 0.5
+  )
+  
+  # Tidy covariate results
+  univariate_comp <- run_comprehensive_msm_analysis(
+    univariate_models, pt_stg, crude_rates, mc.cores = n.cores, 
+    analysis_config = config_core
+  )
+  
+  # spline_summary <- tidy_msm_models(spline_models)
+  transition_specific_comp <- run_comprehensive_msm_analysis(
+    transition_specific_models, pt_stg, crude_rates, mc.cores = n.cores, 
+    analysis_config = config_core
+  )
+  
+  # interaction_summary <- tidy_msm_models(interaction_models)
+  
+  covariate_comparison <- compare_covariate_effects(
+    c(univariate_models),
+    base_formula = "~ 1"
+  )
+  
+  # interaction_comparison <- compare_interaction_models(interaction_models)
+  
+  saveRDS(univariate_models, here("data", "temp", "univariate_models.rds"))
+  saveRDS(univariate_comp, here("data", "temp", "univariate_comp.rds"))
+  # saveRDS(spline_models, here("data", "temp", "spline_models.rds"))
+  saveRDS(transition_specific_models, here("data", "temp", "transition_specific_models.rds"))
+  saveRDS(transition_specific_comp, here("data", "temp", "transition_specific_comp.rds"))
+  # saveRDS(interaction_models, here("data", "temp", "interaction_models.rds"))
+  saveRDS(multivariate_models, here("data", "temp", "multivariate_models.rds"))
+  # saveRDS(nonlinear_tests, here("data", "temp", "nonlinear_tests.rds"))
+  # saveRDS(covariate_comparison, here("data", "temp", "covariate_comparison.rds"))
+  # saveRDS(interaction_comparison, here("data", "temp", "interaction_comparison.rds"))
+  gc()
+  
+  # Make objects available globally
+  assign("univariate_models", univariate_models, envir = .GlobalEnv)
+  assign("univariate_comp", univariate_comp, envir = .GlobalEnv)
+  assign("transition_specific_models", transition_specific_models, envir = .GlobalEnv)
+  assign("transition_specific_comp", transition_specific_comp, envir = .GlobalEnv)
+  assign("multivariate_models", multivariate_models, envir = .GlobalEnv)
+  assign("covariate_comparison", covariate_comparison, envir = .GlobalEnv)
+})
 
 # # Predictive performance evaluation --------------------------------------
 # 
@@ -456,96 +508,148 @@ gc()
 # saveRDS(transition_residuals, here("data", "temp", "transition_residuals.rds"))
 # cat("Transition residuals calculated for", nrow(transition_residuals), "transitions\n")
 # 
+
 # Long-stay patient sensitivity analysis --------------------------------
 
-cat("\n=== LONG-STAY PATIENT SENSITIVITY ANALYSIS ===\n")
-
-# Identify long-stay patients (>30 days)
-long_stay_patients <- pt_stg %>%
-  dplyr::filter(model == "base_model") %>%
-  group_by(deid_enc_id) %>%
-  summarise(max_los = max(DaysSinceEntry), .groups = "drop") %>%
-  filter(max_los > 30) %>%
-  pull(deid_enc_id)
-
-# Excluded analysis (remove long-stay patients)
-excluded_data <- pt_stg %>%
-  filter(!deid_enc_id %in% long_stay_patients)
-
-excluded_crude_rates <- calc_crude_init_rates(
-  excluded_data, 
-  qmat_list
-)
-
-excluded_models <- fit_msm_models(
-  patient_data = excluded_data,
-  crude_rates = excluded_crude_rates,
-  covariates = NULL,
-  mc.cores = n.cores
-)
-
-excluded_models_univar <- fit_msm_models(
-  patient_data = excluded_data,
-  crude_rates = excluded_crude_rates,
-  covariates = setNames(as.list(key_covariates), paste0("univar_", key_covariates)),
-  mc.cores = n.cores
-)
-
-# Truncated analysis (truncate at 30 days)
-truncated_data <- pt_stg %>%
-  filter(DaysSinceEntry <= 30)
-
-truncated_crude_rates <- calc_crude_init_rates(
-  truncated_data,
-  qmat_list
-)
-
-truncated_models <- fit_msm_models(
-  patient_data = truncated_data,
-  crude_rates = truncated_crude_rates,
-  covariates = NULL,
-  mc.cores = n.cores
-)
-
-truncated_models_univar <- fit_msm_models(
-  patient_data = truncated_data,
-  crude_rates = truncated_crude_rates,
-  covariates = setNames(as.list(key_covariates), paste0("univar_", key_covariates)),
-  mc.cores = n.cores
-)
-
-long_stay_sensitivity <- list(
-  long_stay_patients = long_stay_patients,
-  n_long_stay = length(long_stay_patients),
-  excluded = list(
-    data = excluded_data,
-    crude_rates = excluded_crude_rates,
-    models = excluded_models,
-    univariate_models = excluded_models_univar
-  ),
-  truncated = list(
-    data = truncated_data,
-    crude_rates = truncated_crude_rates,
-    models = truncated_models,
-    univariate_models = truncated_models_univar
+results_log$sensitivity_analysis <- run_section_safely("LONG-STAY PATIENT SENSITIVITY ANALYSIS", function() {
+  # Identify long-stay patients (>30 days)
+  long_stay_patients <- pt_stg %>%
+    dplyr::filter(model == "base_model") %>%
+    group_by(deid_enc_id) %>%
+    summarise(max_los = max(DaysSinceEntry), .groups = "drop") %>%
+    filter(max_los > 30) %>%
+    pull(deid_enc_id)
+  
+  # Excluded analysis (remove long-stay patients)
+  excluded_data <- pt_stg %>%
+    filter(!deid_enc_id %in% long_stay_patients)
+  
+  excluded_crude_rates <- calc_crude_init_rates(
+    excluded_data, 
+    qmat_list
   )
-)
+  gc()  # Clean up after large data transformation
+  
+  excluded_models <- fit_msm_models(
+    patient_data = excluded_data,
+    crude_rates = excluded_crude_rates,
+    covariates = NULL,
+    mc.cores = n.cores
+  )
+  
+  excluded_models_univar <- fit_msm_models(
+    patient_data = excluded_data,
+    crude_rates = excluded_crude_rates,
+    covariates = setNames(as.list(key_covariates), paste0("univar_", key_covariates)),
+    mc.cores = n.cores
+  )
+  
+  # Truncated analysis (truncate at 30 days)
+  truncated_data <- pt_stg %>%
+    filter(DaysSinceEntry <= 30)
+  
+  truncated_crude_rates <- calc_crude_init_rates(
+    truncated_data,
+    qmat_list
+  )
+  gc()  # Clean up after large data transformation
+  
+  truncated_models <- fit_msm_models(
+    patient_data = truncated_data,
+    crude_rates = truncated_crude_rates,
+    covariates = NULL,
+    mc.cores = n.cores
+  )
+  
+  truncated_models_univar <- fit_msm_models(
+    patient_data = truncated_data,
+    crude_rates = truncated_crude_rates,
+    covariates = setNames(as.list(key_covariates), paste0("univar_", key_covariates)),
+    mc.cores = n.cores
+  )
+  
+  long_stay_sensitivity <- list(
+    long_stay_patients = long_stay_patients,
+    n_long_stay = length(long_stay_patients),
+    excluded = list(
+      data = excluded_data,
+      crude_rates = excluded_crude_rates,
+      models = excluded_models,
+      univariate_models = excluded_models_univar
+    ),
+    truncated = list(
+      data = truncated_data,
+      crude_rates = truncated_crude_rates,
+      models = truncated_models,
+      univariate_models = truncated_models_univar
+    )
+  )
+  
+  # Check if base models exist for comparison
+  if (!exists("fitted_base_models") || is.null(fitted_base_models)) {
+    if (file.exists(here("data", "temp", "fitted_base_models.rds"))) {
+      fitted_base_models <- readRDS(here("data", "temp", "fitted_base_models.rds"))
+    }
+  }
+  
+  if (!exists("univariate_models") || is.null(univariate_models)) {
+    if (file.exists(here("data", "temp", "univariate_models.rds"))) {
+      univariate_models <- readRDS(here("data", "temp", "univariate_models.rds"))
+    }
+  }
+  
+  long_stay_models <- c(
+    base_models = if(exists("fitted_base_models")) fitted_base_models else list(),
+    univariate_models = if(exists("univariate_models")) univariate_models else list(),
+    excluded_models = excluded_models,
+    excluded_univariate_models = excluded_models_univar,
+    truncated_models = truncated_models,
+    truncated_univariate_models = truncated_models_univar
+  )
+  
+  long_stay_model_comp <- run_comprehensive_msm_analysis(
+    long_stay_models, pt_stg, crude_rates, mc.cores = n.cores, 
+    analysis_config = config_core
+  )
+  
+  saveRDS(long_stay_sensitivity, here("data", "temp", "long_stay_sensitivity.rds"))
+  saveRDS(long_stay_models, here("data", "temp", "long_stay_models.rds"))
+  saveRDS(long_stay_model_comp, here("data", "temp", "long_stay_model_comp.rds"))
+  gc()
+  
+  # Make objects available globally
+  assign("long_stay_sensitivity", long_stay_sensitivity, envir = .GlobalEnv)
+  assign("long_stay_models", long_stay_models, envir = .GlobalEnv)
+  assign("long_stay_model_comp", long_stay_model_comp, envir = .GlobalEnv)
+})
 
-saveRDS(long_stay_sensitivity, here("data", "temp", "long_stay_sensitivity.rds"))
+# Final execution summary -------------------------------------------------
 
-long_stay_models <- c(
-  base_models = fitted_base_models,
-  univariate_models = univariate_models,
-  excluded_models = excluded_models,
-  excluded_univariate_models = excluded_models_univar,
-  truncated_models = truncated_models,
-  truncated_univariate_models = truncated_models_univar
-)
+cat("\n" + "="*50 + "\n")
+cat("EXECUTION SUMMARY\n")
+cat("="*50 + "\n")
 
-long_stay_model_comp <- run_comprehensive_msm_analysis(
-  long_stay_models, pt_stg, crude_rates, mc.cores = n.cores, 
-  analysis_config = config_core
-)
+for (section in names(results_log)) {
+  status <- results_log[[section]]$status
+  duration <- results_log[[section]]$duration
+  symbol <- ifelse(status == "success", "✓", "✗")
+  cat(symbol, toupper(gsub("_", " ", section)), "-", status)
+  if (!is.na(duration)) {
+    cat(" (", duration, "mins )")
+  }
+  cat("\n")
+}
 
-saveRDS(long_stay_models, here("data", "temp", "long_stay_models.rds"))
-saveRDS(long_stay_model_comp, here("data", "temp", "long_stay_model_comp.rds"))
+# Count successes/failures
+successes <- sum(sapply(results_log, function(x) x$status == "success"))
+total <- length(results_log)
+cat("\nOverall:", successes, "of", total, "sections completed successfully\n")
+
+if (successes < total) {
+  cat("\nFailed sections can be re-run individually by loading saved data and running the specific section.\n")
+  cat("Check the temp/ directory for available saved objects.\n")
+}
+
+# Save the execution log
+saveRDS(results_log, here("data", "temp", "execution_log.rds"))
+cat("\nExecution log saved to: data/temp/execution_log.rds\n")
