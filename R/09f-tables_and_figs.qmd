@@ -15,7 +15,7 @@ editor_options:
   markdown: 
     wrap: 72
 execute:
-  cache: true
+  cache: false
 ---
 
 ```{r}
@@ -33,6 +33,7 @@ library(Hmisc)
 library(ggpubr)
 library(reactable)
 library(plotly)
+library(viridis)
 
 ```
 
@@ -55,7 +56,7 @@ models_for_markov_comp <- readRDS(here("data", "temp", "markov_model_comp.rds"))
 ```
 
 ```{r}
-#| label: define-orders
+#| label: setup parameters for plots
 
 stage_order <- c("4", "5", "6", "7", "8", "9", "10", "11")
 state_order <- c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2", "D", "R")
@@ -878,6 +879,8 @@ markov_models_summary <- models_for_markov_comp[["model_summary"]] %>%
   mutate(model_name = case_when(model == "base_no_covariates" ~ "Base Model",
                                 model == "base_with_time_severe" ~ "Base Model +\ntime in severe\ncovariate",
                                 model == "history_severe_structure" ~ "State for history\nof severe",
+                                model == "base_with_time_severe_spline" ~ "Base Model +\ntime in severe\nspline covariate",
+                                model == "base_with_time_severe_ts" ~ "Base Model +\ntime in severe\ntransition-specific",
                                 TRUE ~ NA_character_)) %>%
   # left_join(models_df, by = "model") %>%
   dplyr::select(model_name, n_params, loglik, AIC, BIC)
@@ -896,35 +899,47 @@ markov_models_summary_long <- markov_models_summary %>%
   pivot_longer(cols = -model_name, names_to = "metric", values_to = "value") %>%
   mutate(metric = factor(metric, levels = c("n_params", "loglik", "AIC", "BIC"),
                          labels = c("Number of parameters", "Log-likelihood", "AIC", "BIC")))
+  
+markov_models_summary_long_colors <- markov_models_summary_long %>%
+  dplyr::filter(model_name!= "State for history\nof severe") %>%
+  group_by(metric) %>%
+  mutate(rank = dense_rank(value))
 
-ggplot(markov_models_summary_long, aes(x = model_name, y = value, color = model_name)) +
+markov_models_summary_long <- markov_models_summary_long %>%
+  left_join(markov_models_summary_long_colors %>%
+              dplyr::select(model_name, metric, rank),
+            by = c("model_name", "metric"))
+
+ggplot(markov_models_summary_long, aes(x = model_name, y = value, color = rank, shape = model_name)) +
   geom_point(size = 3) +
   geom_line(aes(group = model_name), linewidth = 1) +
   facet_wrap(~ metric, scales = "free_y", nrow = 4) +
-  scale_color_manual(values = c("black", "black", "grey")) +
+  scale_color_viridis(option = "mako", na.value = "darkgrey") +
+  scale_shape_manual(values = c(17, 16, 16, 16, 1)) +
   labs(x = "Covariate structure", y = "Value", color = "Model") +
   theme_minimal() +
-  theme(legend.position = "bottom", axis.title = element_blank())
+  theme(legend.position = "bottom", axis.title = element_blank()) +
+  guides(color = "none", shape = "none")
 
-markov_models_comparison_across <- models_for_markov_comp$model_comparison$across_structure %>%
-  drop_na() %>%
-  dplyr::filter(formula2 == "~ 1") %>%
-  mutate(draic_text = format_ci(draic, draic_ll, draic_ul, digits = 3),
-         drlcv_text = format_ci(drlcv, drlcv_ll, drlcv_ul, digits = 3)) %>%
-  mutate(model1 = recode(model1_struct, !!!models),
-         model2 = recode(model2_struct, !!!models)) %>%
-  mutate(preferred_model_draic = ifelse(draic < 0, model1_struct, model2_struct),
-         preferred_model_drlcv = ifelse(drlcv < 0, model1_struct, model2_struct))
+# markov_models_comparison_across <- models_for_markov_comp$model_comparison$across_structure %>%
+#   drop_na() %>%
+#   dplyr::filter(formula2 == "~ 1") %>%
+#   mutate(draic_text = format_ci(draic, draic_ll, draic_ul, digits = 3),
+#          drlcv_text = format_ci(drlcv, drlcv_ll, drlcv_ul, digits = 3)) %>%
+#   mutate(model1 = recode(model1_struct, !!!models),
+#          model2 = recode(model2_struct, !!!models)) %>%
+#   mutate(preferred_model_draic = ifelse(draic < 0, model1_struct, model2_struct),
+#          preferred_model_drlcv = ifelse(drlcv < 0, model1_struct, model2_struct))
 
-kable(markov_models_comparison_across %>%
-  dplyr::select(model1, model2, draic_text, drlcv_text, 
-                preferred_model_draic, preferred_model_drlcv),
-  col.names = c("Model 1", "Model 2", 
-                      "ΔrAIC (95% CI)", "ΔrLCV (95% CI)",
-                      "Preferred model (ΔrAIC)", "Preferred model (ΔrLCV)"),
-        digits = c(0, 0, 3, 3, 0, 0)) %>%
-  kable_styling(full_width = FALSE) %>%
-  row_spec(0, bold = TRUE)
+# kable(markov_models_comparison_across %>%
+#   dplyr::select(model1, model2, draic_text, drlcv_text, 
+#                 preferred_model_draic, preferred_model_drlcv),
+#   col.names = c("Model 1", "Model 2", 
+#                       "ΔrAIC (95% CI)", "ΔrLCV (95% CI)",
+#                       "Preferred model (ΔrAIC)", "Preferred model (ΔrLCV)"),
+#         digits = c(0, 0, 3, 3, 0, 0)) %>%
+#   kable_styling(full_width = FALSE) %>%
+#   row_spec(0, bold = TRUE)
 
 ```
 

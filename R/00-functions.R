@@ -30,6 +30,7 @@ calc_crude_init_rates <- function(patient_data, qmat_list) {
 }
 
 ## Fit multi-state model ----------------------------------------------
+
 fit_msm_models <- function(patient_data, 
                            crude_rates, 
                            covariates = NULL, 
@@ -47,25 +48,40 @@ fit_msm_models <- function(patient_data,
     covariates <- list("no_covariates" = NULL)
   }
   
-  # Handle constraint parameter - ALWAYS define constraint_for_msm
-  constraint_for_msm <- NULL  # Default value
-  
-  if (!is.null(constraint)) {
-    if (constraint == "default") {
-      constraint_for_msm <- NULL  # Use MSM default behavior
-    } else if (constraint == "unconstrained") {
-      constraint_for_msm <- NULL
-    } else if (constraint == "same") {
-      constraint_for_msm <- NULL
-    } else if (is.matrix(constraint)) {
-      constraint_for_msm <- constraint
-    } else {
-      constraint_for_msm <- NULL
+  # Helper function to create constraint list for same effects across transitions
+  create_same_effect_constraints <- function(covariate_names, n_transitions, model_data) {
+    if (is.null(covariate_names) || length(covariate_names) == 0) {
+      return(NULL)
     }
+    
+    constraint_list <- list()
+    
+    for (cov_name in covariate_names) {
+      if (cov_name %in% names(model_data)) {
+        # Check if this is a factor variable
+        if (is.factor(model_data[[cov_name]]) || is.character(model_data[[cov_name]])) {
+          # For factors, we need to handle each level (excluding baseline)
+          factor_levels <- levels(as.factor(model_data[[cov_name]]))
+          
+          # Skip baseline level (first level with default contrasts)
+          if (length(factor_levels) > 1) {
+            for (i in 2:length(factor_levels)) {
+              level_name <- paste0(cov_name, factor_levels[i])
+              constraint_list[[level_name]] <- rep(1, n_transitions)
+            }
+          }
+        } else {
+          # For continuous variables, same effect across all transitions
+          constraint_list[[cov_name]] <- rep(1, n_transitions)
+        }
+      }
+    }
+    
+    return(if (length(constraint_list) == 0) NULL else constraint_list)
   }
   
   # Get unique model names
-  model_names <- unique(patient_data$model)
+  model_names <- names(crude_rates)
   
   # Define function to fit models for a single model structure
   fit_single_model_structure <- function(modelname) {
@@ -81,6 +97,10 @@ fit_msm_models <- function(patient_data,
       warning(paste("Crude rates missing for", modelname, "- skipping model fitting"))
       return(NULL)
     }
+    
+    qmat <- crude_result$qmat
+    # n_transitions <- sum(qmat != 0) - nrow(qmat)  # off-diagonal non-zero elements
+    n_transitions <- sum(qmat != 0 & row(qmat) != col(qmat))
     
     # Validate that required variables exist in the data
     all_vars_needed <- unique(unlist(covariates))
@@ -112,6 +132,36 @@ fit_msm_models <- function(patient_data,
       if (!is.null(current_covariates) && length(current_covariates) > 0) {
         formula_name <- paste("~", paste(current_covariates, collapse = " + "))
         covariate_formula <- as.formula(formula_name)
+      }
+      
+      # Handle constraint parameter based on the constraint argument and current covariates
+      constraint_for_msm <- NULL
+      constraint_type_label <- "none"
+      
+      if (!is.null(current_covariates) && length(current_covariates) > 0) {
+        if (!is.null(constraint)) {
+          if (constraint == "default") {
+            # Same effect across all transitions
+            constraint_for_msm <- create_same_effect_constraints(current_covariates, n_transitions, model_data)
+            constraint_type_label <- "same_across_transitions"
+          } else if (constraint == "unconstrained" || is.null(constraint)) {
+            # Different effect for each transition (no constraints)
+            constraint_for_msm <- NULL
+            constraint_type_label <- "by_transition"
+          } else if (is.list(constraint)) {
+            # User-provided constraint list
+            constraint_for_msm <- constraint
+            constraint_type_label <- "custom"
+          } else {
+            # Default to same effect if constraint parameter is not recognized
+            constraint_for_msm <- create_same_effect_constraints(current_covariates, n_transitions, model_data)
+            constraint_type_label <- "same_across_transitions"
+          }
+        } else {
+          # No constraints (different effects per transition)
+          constraint_for_msm <- NULL
+          constraint_type_label <- "by_transition"
+        }
       }
       
       # Try different optimization methods if convergence fails
@@ -165,6 +215,9 @@ fit_msm_models <- function(patient_data,
           if (!is.null(msm_args$covariates)) {
             cat("Covariates formula:", deparse(msm_args$covariates), "\n")
           }
+          if (!is.null(msm_args$constraint)) {
+            cat("Constraint applied for same effects across transitions\n")
+          }
           
           result <- do.call(msm::msm, msm_args)
           cat("MSM fitting successful\n")
@@ -205,7 +258,7 @@ fit_msm_models <- function(patient_data,
           status = "failed",
           optimization_method = NA,
           spline_config = NULL,
-          constraint_type = NA
+          constraint_type = constraint_type_label
         )
       } else {
         model_results[[formula_name]] <- list(
@@ -214,7 +267,7 @@ fit_msm_models <- function(patient_data,
           status = "converged",
           optimization_method = successful_method,
           spline_config = NULL,  # No splines in this function
-          constraint_type = constraint
+          constraint_type = constraint_type_label
         )        
       }
     }
@@ -242,7 +295,6 @@ fit_msm_models <- function(patient_data,
   return(fitted_msm_models)
 }
 
-
 fit_spline_msm_models <- function(patient_data, 
                                   crude_rates, 
                                   covariates = NULL, 
@@ -253,9 +305,6 @@ fit_spline_msm_models <- function(patient_data,
                                   mc.cores = min(8, parallel::detectCores() - 1)) {
   
   # Load required packages
-  if (!requireNamespace("parallel", quietly = TRUE)) {
-    stop("parallel package is required for parallelization")
-  }
   if (!requireNamespace("splines", quietly = TRUE)) {
     stop("splines package is required for spline functionality")
   }
@@ -263,70 +312,27 @@ fit_spline_msm_models <- function(patient_data,
   # Handle the case where covariates is NULL but splines exist
   if (is.null(covariates)) {
     if (!is.null(spline_vars)) {
-      # If we have spline vars but no covariates, create a default entry
       covariates <- list("splines_only" = NULL)
     } else {
       covariates <- list("no_covariates" = NULL)
     }
   }
   
-  # Ensure spline_df is a named list (can be variable-based or combination-based)
+  # Ensure spline_df is a named list
   if (!is.null(spline_df) && !is.list(spline_df)) {
-    # If spline_df is a single value, convert to list
     spline_df <- list(default = spline_df)
   }
   
-  # Handle constraint parameter - ALWAYS define constraint_for_msm
-  constraint_for_msm <- NULL  # Default value
-  
-  if (!is.null(constraint)) {
-    if (constraint == "default") {
-      constraint_for_msm <- NULL  # Use MSM default behavior
-    } else if (constraint == "unconstrained") {
-      constraint_for_msm <- NULL
-    } else if (constraint == "same") {
-      constraint_for_msm <- NULL
-    } else if (is.matrix(constraint)) {
-      constraint_for_msm <- constraint
-    } else {
-      constraint_for_msm <- NULL
-    }
-  }
+  # Pre-process data to add spline terms
+  processed_data_list <- list()
+  processed_covariates <- list()
+  spline_metadata <- list()  # Store spline information for later use
   
   # Get unique model names
   model_names <- unique(patient_data$model)
   
-  # Define function to fit models for a single model structure
-  fit_single_model_structure <- function(modelname) {
-    # Ensure required packages are loaded in parallel worker
-    if (!require("msm", quietly = TRUE)) {
-      return(list(error = "msm package not available"))
-    }
-    if (!require("splines", quietly = TRUE)) {
-      return(list(error = "splines package not available"))
-    }
-    
-    model_data <- patient_data[which(patient_data$model == modelname), ]
-    crude_result <- crude_rates[[modelname]]
-    
-    if (is.null(crude_result)) {
-      warning(paste("Crude rates missing for", modelname, "- skipping model fitting"))
-      return(NULL)
-    }
-    
-    # Validate that required variables exist in the data
-    all_vars_needed <- unique(unlist(c(covariates, spline_vars)))
-    all_vars_needed <- all_vars_needed[!is.null(all_vars_needed)]
-    if (length(all_vars_needed) > 0) {
-      missing_vars <- setdiff(all_vars_needed, names(model_data))
-      if (length(missing_vars) > 0) {
-        warning(paste("Variables not found in data for model", modelname, ":", 
-                      paste(missing_vars, collapse = ", ")))
-        # Continue but exclude missing variables
-      }
-    }
-    
-    model_results <- list()
+  for (modelname in model_names) {
+    model_data <- patient_data[patient_data$model == modelname, ]
     
     # Loop through each covariate combination
     for (cov_name in names(covariates)) {
@@ -349,6 +355,10 @@ fit_spline_msm_models <- function(patient_data,
       model_data_with_splines <- model_data
       spline_var_names <- c()
       
+      # Initialize spline metadata for this combination
+      combination_key <- paste(modelname, cov_name, sep = "_")
+      spline_metadata[[combination_key]] <- list()
+      
       # Pre-compute spline variables and add to data
       if (!is.null(current_splines) && length(current_splines) > 0) {
         for (spline_var in current_splines) {
@@ -363,9 +373,21 @@ fit_spline_msm_models <- function(patient_data,
             3  # Final fallback
           }
           
-          # Create spline basis
+          # Create spline basis and store metadata
           tryCatch({
             spline_basis <- splines::ns(model_data_with_splines[[spline_var]], df = df_value)
+            
+            # Store original variable data and spline metadata
+            spline_metadata[[combination_key]][[spline_var]] <- list(
+              original_values = model_data_with_splines[[spline_var]],
+              df = df_value,
+              knots = attr(spline_basis, "knots"),
+              boundary_knots = attr(spline_basis, "Boundary.knots"),
+              intercept = attr(spline_basis, "intercept"),
+              degree = attr(spline_basis, "degree"),
+              var_range = range(model_data_with_splines[[spline_var]], na.rm = TRUE),
+              spline_terms = paste0(spline_var, "_ns", 1:ncol(spline_basis))
+            )
             
             # Add each spline basis function as a separate variable
             for (i in 1:ncol(spline_basis)) {
@@ -375,167 +397,129 @@ fit_spline_msm_models <- function(patient_data,
             }
             
           }, error = function(e) {
-            warning(paste("Failed to create spline basis for", spline_var, ":", e$message))
+            warning(paste("Failed to create spline basis for", spline_var, "in model", modelname, ":", e$message))
           })
         }
       }
       
-      # Create formula string for this combination
-      formula_name <- "~ 1"  # Default intercept-only
-      covariate_formula <- NULL
+      # Store the processed data
+      data_key <- paste(modelname, cov_name, sep = "_")
+      processed_data_list[[data_key]] <- model_data_with_splines
       
-      if (!is.null(current_covariates) || length(spline_var_names) > 0) {
-        formula_terms <- c()
-        
-        # Add regular covariates (those not in spline list)
-        if (!is.null(current_covariates)) {
-          non_spline_covariates <- setdiff(current_covariates, current_splines)
-          if (length(non_spline_covariates) > 0) {
-            formula_terms <- c(formula_terms, non_spline_covariates)
-          }
-        }
-        
-        # Add pre-computed spline terms
-        if (length(spline_var_names) > 0) {
-          formula_terms <- c(formula_terms, spline_var_names)
-        }
-        
-        if (length(formula_terms) > 0) {
-          formula_name <- paste("~", paste(formula_terms, collapse = " + "))
-          covariate_formula <- as.formula(formula_name)
+      # Create the new covariate list for this combination
+      final_covariates <- c()
+      
+      # Add regular covariates (those not in spline list)
+      if (!is.null(current_covariates)) {
+        non_spline_covariates <- setdiff(current_covariates, current_splines)
+        if (length(non_spline_covariates) > 0) {
+          final_covariates <- c(final_covariates, non_spline_covariates)
         }
       }
       
-      # Try different optimization methods if convergence fails
-      optimization_methods <- list(
-        list(opt_method = "optim", control_extra = list(fnscale = 10000, maxit = 5000, reltol = 1e-10), name = "BFGS"),
-        list(opt_method = "bobyqa", control_extra = list(fnscale = 10000, maxit = 5000, reltol = 1e-10), name = "BOBYQA"),
-        list(opt_method = "optim", control_extra = list(fnscale = 10000, maxit = 10000), name = "Nelder-Mead")
-      )
-      
-      fitted_model <- NULL
-      last_error <- NULL
-      successful_method <- NULL
-      
-      for (opt_config in optimization_methods) {
-        
-        fitted_model <- tryCatch({
-          # Build MSM arguments
-          msm_args <- list(
-            formula = state_num ~ DaysSinceEntry,
-            subject = quote(deid_enc_id),
-            data = model_data_with_splines,
-            qmatrix = crude_result$qmat,
-            opt.method = opt_config$opt_method,
-            control = opt_config$control_extra
-          )
-          
-          # Add covariates if they exist
-          if (!is.null(covariate_formula)) {
-            msm_args$covariates <- covariate_formula
-          }
-          
-          # Add constraint if specified
-          if (!is.null(constraint_for_msm)) {
-            msm_args$constraint <- constraint_for_msm
-          }
-          
-          # Fit the model
-          cat("Attempting to fit MSM model with:", length(msm_args), "arguments\n")
-          cat("Formula:", deparse(msm_args$formula), "\n")
-          if (!is.null(msm_args$covariates)) {
-            cat("Covariates formula:", deparse(msm_args$covariates), "\n")
-          }
-          
-          result <- do.call(msm::msm, msm_args)
-          cat("MSM fitting successful\n")
-          result
-          
-        }, error = function(e) {
-          last_error <<- e$message
-          return(NULL)
-        })
-        
-        # Check if model fitted successfully and converged
-        if (!is.null(fitted_model)) {
-          converged <- is.null(fitted_model$opt$convergence) || fitted_model$opt$convergence == 0
-          
-          if (converged) {
-            message(paste("Model", modelname, "with formula", formula_name, "converged successfully using", opt_config$name))
-            successful_method <- opt_config$name
-            break
-          } else {
-            message(paste("Model", modelname, "with formula", formula_name, "failed to converge with", opt_config$name, "- trying next method"))
-            fitted_model <- NULL  # Reset for next iteration
-          }
-        } else {
-          message(paste("Model", modelname, "with formula", formula_name, "failed to fit with", opt_config$name, "- trying next method"))
-        }
+      # Add spline terms
+      if (length(spline_var_names) > 0) {
+        final_covariates <- c(final_covariates, spline_var_names)
       }
       
-      # Store result or failure information
-      if (is.null(fitted_model)) {
-        failure_msg <- paste("All optimization methods failed for", modelname, "with formula", formula_name)
-        if (!is.null(last_error)) {
-          failure_msg <- paste(failure_msg, "- Last error:", last_error)
-        }
-        warning(failure_msg)
-        model_results[[formula_name]] <- list(
-          fitted_model = NULL,
-          error_message = failure_msg,
-          status = "failed",
-          optimization_method = NA,
-          spline_config = NULL,
-          constraint_type = NA
-        )
+      # Store the final covariate list
+      if (length(final_covariates) > 0) {
+        processed_covariates[[cov_name]] <- final_covariates
       } else {
-        # Create spline configuration metadata
-        spline_config <- list(
-          spline_vars = current_splines,
-          spline_df = if (!is.null(current_splines) && length(current_splines) > 0) {
-            # Get the df value that was actually used
-            if (!is.null(spline_df) && !is.null(spline_df[[cov_name]])) {
-              spline_df[[cov_name]]
-            } else if (!is.null(spline_df) && !is.null(spline_df[["default"]])) {
-              spline_df[["default"]]
-            } else {
-              3
-            }
-          } else NULL
-        )
-        
-        model_results[[formula_name]] <- list(
-          fitted_model = fitted_model,
-          error_message = NULL,
-          status = "converged",
-          optimization_method = successful_method,
-          spline_config = spline_config,
-          constraint_type = constraint
-        )        
+        processed_covariates[[cov_name]] <- NULL
       }
     }
-    
-    return(model_results)
   }
   
-  # Parallelize across model structures
-  fitted_models_list <- parallel::mclapply(
-    model_names,
-    fit_single_model_structure,
+  # Combine all processed data back into a single dataframe
+  combined_data <- do.call(rbind, processed_data_list)
+  
+  # Call the main fit_msm_models function with processed data and covariates
+  result <- fit_msm_models(
+    patient_data = combined_data,
+    crude_rates = crude_rates,
+    covariates = processed_covariates,
+    constraint = constraint,
+    nest_name = nest_name,
     mc.cores = mc.cores
   )
   
-  # Convert back to named list and remove NULL entries (but keep failed models)
-  fitted_msm_models <- setNames(fitted_models_list, model_names)
-  fitted_msm_models <- fitted_msm_models[!sapply(fitted_msm_models, is.null)]
-  
-  if (!is.null(nest_name)) {
-    fitted_models_nest <- list()
-    fitted_models_nest[[nest_name]] <- fitted_msm_models
-    return(fitted_models_nest)
+  # Add spline metadata to the results
+  if (!is.null(result)) {
+    for (model_structure in names(result)) {
+      for (formula_name in names(result[[model_structure]])) {
+        if (is.list(result[[model_structure]][[formula_name]])) {
+          
+          # We need to figure out which original cov_name this formula corresponds to
+          # by reverse-engineering from the formula and our processed_covariates
+          original_cov_name <- NULL
+          
+          # Check which covariate combination this formula matches
+          for (cov_name in names(processed_covariates)) {
+            expected_covariates <- processed_covariates[[cov_name]]
+            if (!is.null(expected_covariates)) {
+              expected_formula <- paste("~", paste(expected_covariates, collapse = " + "))
+            } else {
+              expected_formula <- "~ 1"
+            }
+            
+            if (formula_name == expected_formula) {
+              original_cov_name <- cov_name
+              break
+            }
+          }
+          
+          # If we found the matching cov_name, get the metadata
+          if (!is.null(original_cov_name)) {
+            metadata_key <- paste(model_structure, original_cov_name, sep = "_")
+            cat("Looking for metadata_key:", metadata_key, "\n")
+            matching_metadata <- if (metadata_key %in% names(spline_metadata)) {
+              spline_metadata[[metadata_key]]
+            } else {
+              cat("Metadata key not found. Available keys:", names(spline_metadata), "\n")
+              NULL
+            }
+            
+            # Determine which spline variables were used for this specific combination
+            current_splines <- if (!is.null(spline_vars)) {
+              if (is.list(spline_vars)) {
+                if (original_cov_name %in% names(spline_vars)) {
+                  spline_vars[[original_cov_name]]
+                } else {
+                  NULL  # No splines for this combination
+                }
+              } else {
+                spline_vars  # Same splines for all combinations
+              }
+            } else {
+              NULL
+            }
+            
+            # Create enhanced spline configuration metadata
+            spline_config <- list(
+              spline_vars = current_splines,
+              spline_df = if (!is.null(current_splines) && length(current_splines) > 0) {
+                if (!is.null(spline_df) && !is.null(spline_df[[original_cov_name]])) {
+                  spline_df[[original_cov_name]]
+                } else if (!is.null(spline_df) && !is.null(spline_df[["default"]])) {
+                  spline_df[["default"]]
+                } else {
+                  3
+                }
+              } else NULL,
+              spline_metadata = matching_metadata  # This contains all the detailed spline info
+            )
+            
+            # Store the spline config and original cov name
+            result[[model_structure]][[formula_name]]$spline_config <- spline_config
+            result[[model_structure]][[formula_name]]$original_cov_name <- original_cov_name
+          }
+        }
+      }
+    }
   }
   
-  return(fitted_msm_models)
+  return(result)
 }
 
 ## Extract model results ----------------------------------------------
@@ -1629,11 +1613,45 @@ calculate_predictive_performance <- function(patient_data,
       combination_key <- paste(model_structure, formula_name, sep = "_")
       
       # Run CV folds with enhanced calibration
+      # Replace the fold_results section (around line 90-100) with this:
       fold_results <- if (parallel) {
-        future_map_dfr(1:k_folds, function(fold) {
-          cv_fold_core(fold, model_fold_assignments, model_data, crude_rates[[model_structure]], 
-                       covariate_formula, prediction_times, calibration_covariates, calibration_subgroups, model_entry)
-        }, .options = furrr_options(seed = TRUE))
+        # First attempt with current settings
+        tryCatch({
+          future_map_dfr(1:k_folds, function(fold) {
+            cv_fold_core(fold, model_fold_assignments, model_data, crude_rates[[model_structure]], 
+                         covariate_formula, prediction_times, calibration_covariates, calibration_subgroups, model_entry)
+          }, .options = furrr_options(seed = TRUE))
+        }, error = function(e) {
+          if (grepl("future.globals.maxSize", e$message)) {
+            cat("  Globals size exceeded for", model_structure, formula_name, "- increasing to 750 MiB and retrying...\n")
+            
+            # Store current setting
+            current_maxsize <- getOption("future.globals.maxSize")
+            
+            # Increase to 750 MiB temporarily
+            options(future.globals.maxSize = 750 * 1024^2)
+            
+            tryCatch({
+              result <- future_map_dfr(1:k_folds, function(fold) {
+                cv_fold_core(fold, model_fold_assignments, model_data, crude_rates[[model_structure]], 
+                             covariate_formula, prediction_times, calibration_covariates, calibration_subgroups, model_entry)
+              }, .options = furrr_options(seed = TRUE))
+              
+              cat("  Successfully completed", model_structure, formula_name, "with increased maxSize\n")
+              return(result)
+              
+            }, error = function(e2) {
+              cat("  Failed even with increased maxSize for", model_structure, formula_name, ":", e2$message, "\n")
+              stop("Model ", model_structure, " ", formula_name, " failed: ", e2$message)
+            }, finally = {
+              # Restore original setting
+              options(future.globals.maxSize = current_maxsize)
+            })
+          } else {
+            # Re-throw if it's a different error
+            stop("Model ", model_structure, " ", formula_name, " failed: ", e$message)
+          }
+        })
       } else {
         map_dfr(1:k_folds, function(fold) {
           cv_fold_core(fold, model_fold_assignments, model_data, crude_rates[[model_structure]], 
@@ -3675,7 +3693,7 @@ univariate_progressive_timeout <- function(patient_data, crude_rates, covariates
     
     # save_file <- paste0(save_prefix, "_round_", timeout_idx, "_", current_timeout, "min.RData")
     # save(progress_data, file = here("data", "temp", save_file))
-    saveRDS(progress_data, file = here("data", "temp", save_prefix, "_round_", timeout_idx, "_", current_timeout, "min.rds"))
+    saveRDS(progress_data, file = here("data", "temp", paste0(save_prefix, "_round_", timeout_idx, "_", current_timeout, "min.rds")))
     
     # Round summary
     cat("\n--- Round", timeout_idx, "Summary ---\n")
@@ -3721,10 +3739,7 @@ univariate_progressive_timeout <- function(patient_data, crude_rates, covariates
 
 ## Spline models ----------------------------------------------------------
 
-calculate_spline_hazard_ratios <- function(msm_model, 
-                                           spline_var, 
-                                           original_data,
-                                           spline_df = NULL,
+calculate_spline_hazard_ratios <- function(fit_results, 
                                            n_breaks = 10, 
                                            reference_level = NULL,
                                            transitions = NULL) {
@@ -3738,173 +3753,303 @@ calculate_spline_hazard_ratios <- function(msm_model,
   }
   
   # Input validation
-  if (!inherits(msm_model, "msm")) {
-    stop("msm_model must be a fitted msm object")
+  if (!is.list(fit_results)) {
+    stop("fit_results must be a nested list from fit_spline_msm_models")
   }
   
-  if (!spline_var %in% names(original_data)) {
-    stop(paste("Variable", spline_var, "not found in original_data"))
-  }
+  # Initialize overall results structure
+  all_results <- list()
   
-  # Extract model information
-  model_coeffs <- msm_model$estimates
-  covariate_names <- names(model_coeffs)
-  
-  # Identify spline coefficient patterns (e.g., "age_ns1", "age_ns2")
-  spline_pattern <- paste0("^", spline_var, "_ns[0-9]+$")
-  spline_coeff_names <- covariate_names[grepl(spline_pattern, covariate_names)]
-  
-  if (length(spline_coeff_names) == 0) {
-    stop(paste("No spline coefficients found for variable", spline_var, 
-               "- expected pattern like", paste0(spline_var, "_ns1")))
-  }
-  
-  # Infer degrees of freedom from number of spline terms
-  if (is.null(spline_df)) {
-    spline_df <- length(spline_coeff_names)
-    message(paste("Inferred spline_df =", spline_df, "from model coefficients"))
-  }
-  
-  # Validate df matches found coefficients
-  if (length(spline_coeff_names) != spline_df) {
-    warning(paste("Found", length(spline_coeff_names), "spline coefficients but spline_df =", spline_df))
-  }
-  
-  # Get the range of the spline variable
-  var_range <- range(original_data[[spline_var]], na.rm = TRUE)
-  var_grid <- seq(var_range[1], var_range[2], length.out = n_breaks)
-  
-  # Set reference level (default to median)
-  if (is.null(reference_level)) {
-    reference_level <- median(original_data[[spline_var]], na.rm = TRUE)
-    message(paste("Using median as reference level:", round(reference_level, 2)))
-  }
-  
-  # Validate reference level is within range
-  if (reference_level < var_range[1] || reference_level > var_range[2]) {
-    stop("Reference level is outside the observed range of the variable")
-  }
-  
-  # Create spline basis for the grid and reference point
-  spline_basis_grid <- ns(var_grid, df = spline_df, 
-                          knots = attr(ns(original_data[[spline_var]], df = spline_df), "knots"),
-                          Boundary.knots = attr(ns(original_data[[spline_var]], df = spline_df), "Boundary.knots"))
-  
-  spline_basis_ref <- ns(reference_level, df = spline_df,
-                         knots = attr(ns(original_data[[spline_var]], df = spline_df), "knots"),
-                         Boundary.knots = attr(ns(original_data[[spline_var]], df = spline_df), "Boundary.knots"))
-  
-  # Get transition information from the Q-matrix
-  q_matrix <- qmatrix.msm(msm_model)
-  n_states <- nrow(q_matrix)
-  
-  # Identify allowed transitions
-  if (is.null(transitions)) {
-    allowed_transitions <- which(q_matrix != 0 & row(q_matrix) != col(q_matrix), arr.ind = TRUE)
-    transitions <- paste0(allowed_transitions[,1], " -> ", allowed_transitions[,2])
-    message("Identified transitions:", paste(transitions, collapse = ", "))
-  }
-  
-  # Extract coefficients by transition
-  # MSM stores coefficients in a specific structure - need to parse this
-  coeff_matrix <- msm_model$estimates.t
-  
-  # Initialize results storage
-  results <- list()
-  results$grid_values <- var_grid
-  results$reference_level <- reference_level
-  results$spline_var <- spline_var
-  results$transitions <- list()
-  
-  # Calculate hazard ratios for each transition
-  for (transition_idx in 1:nrow(allowed_transitions)) {
-    from_state <- allowed_transitions[transition_idx, 1]
-    to_state <- allowed_transitions[transition_idx, 2]
-    transition_name <- paste0(from_state, " -> ", to_state)
+  # Iterate through all model structures
+  for (model_structure in names(fit_results)) {
+    cat("Processing model structure:", model_structure, "\n")
+    all_results[[model_structure]] <- list()
     
-    # Extract spline coefficients for this transition
-    transition_coeffs <- numeric(spline_df)
-    
-    # MSM coefficient naming: need to find the right coefficients for this transition
-    # This is tricky - MSM's internal structure varies
-    # Try to extract coefficients by looking at the parameter names and structure
-    
-    tryCatch({
-      for (i in 1:spline_df) {
-        coeff_name <- paste0(spline_var, "_ns", i)
-        
-        # Look for this coefficient in the transition-specific estimates
-        if (coeff_name %in% rownames(coeff_matrix)) {
-          # Find the column corresponding to this transition
-          # MSM typically orders by transition: 1->2, 1->3, etc.
-          transition_col <- which(colnames(coeff_matrix) == paste(from_state, to_state, sep = " "))
-          if (length(transition_col) == 0) {
-            # Try alternative naming
-            transition_col <- transition_idx
-          }
-          
-          if (transition_col <= ncol(coeff_matrix)) {
-            transition_coeffs[i] <- coeff_matrix[coeff_name, transition_col]
-          }
-        }
+    # Iterate through all formula combinations
+    for (formula_name in names(fit_results[[model_structure]])) {
+      cat("Processing formula:", formula_name, "\n")
+      model_result <- fit_results[[model_structure]][[formula_name]]
+      
+      # Skip if not a valid model result
+      if (!is.list(model_result) || is.null(model_result$fitted_model)) {
+        warning(paste("Skipping", model_structure, formula_name, "- no fitted model found"))
+        next
       }
       
-      # Calculate linear predictor at grid points
-      linear_pred_grid <- as.numeric(spline_basis_grid %*% transition_coeffs)
+      msm_model <- model_result$fitted_model
       
-      # Calculate linear predictor at reference point  
-      linear_pred_ref <- as.numeric(spline_basis_ref %*% transition_coeffs)
+      # Extract spline configuration
+      spline_config <- model_result$spline_config
+      if (is.null(spline_config) || is.null(spline_config$spline_vars)) {
+        message(paste("No spline variables found for", model_structure, formula_name, "- skipping"))
+        next
+      }
       
-      # Calculate hazard ratios (relative to reference)
-      log_hr <- linear_pred_grid - linear_pred_ref
-      hazard_ratios <- exp(log_hr)
+      spline_vars <- spline_config$spline_vars
+      spline_df <- spline_config$spline_df
       
-      # Store results
-      results$transitions[[transition_name]] <- list(
-        from_state = from_state,
-        to_state = to_state,
-        coefficients = transition_coeffs,
-        linear_predictor = linear_pred_grid,
-        hazard_ratios = hazard_ratios,
-        log_hazard_ratios = log_hr
-      )
+      cat("Found spline vars:", paste(spline_vars, collapse = ", "), "\n")
       
-    }, error = function(e) {
-      warning(paste("Could not extract coefficients for transition", transition_name, ":", e$message))
-      results$transitions[[transition_name]] <- list(
-        from_state = from_state,
-        to_state = to_state,
-        coefficients = rep(NA, spline_df),
-        linear_predictor = rep(NA, length(var_grid)),
-        hazard_ratios = rep(NA, length(var_grid)),
-        log_hazard_ratios = rep(NA, length(var_grid))
-      )
-    })
+      # Process each spline variable
+      model_spline_results <- list()
+      
+      for (spline_var in spline_vars) {
+        cat("Starting processing for spline_var:", spline_var, "\n")
+        
+        # Extract spline metadata which contains original variable data
+        cat("About to extract spline_metadata from spline_config\n")
+        current_spline_metadata <- spline_config$spline_metadata
+        cat("Successfully extracted spline_metadata\n")
+        
+        if (is.null(current_spline_metadata)) {
+          warning(paste("No spline metadata found for", model_structure, formula_name, "- skipping"))
+          next
+        }
+        
+        cat("About to get var_metadata for:", spline_var, "\n")
+        # Get spline metadata for this variable
+        var_metadata <- current_spline_metadata[[spline_var]]
+        cat("Successfully got var_metadata\n")
+        
+        if (is.null(var_metadata)) {
+          warning(paste("No metadata found for variable", spline_var, "in", model_structure, formula_name))
+          next
+        }
+        
+        # Extract original variable values and spline parameters from metadata
+        original_values <- var_metadata$original_values
+        current_df <- var_metadata$df
+        knots <- var_metadata$knots
+        boundary_knots <- var_metadata$boundary_knots
+        var_range <- var_metadata$var_range
+        spline_terms <- var_metadata$spline_terms
+        
+        # Extract model information
+        model_coeffs <- msm_model$estimates
+        covariate_names <- names(model_coeffs)
+        
+        # Get covariate labels from the MSM model
+        cov_labels <- msm_model[["qcmodel"]][["covlabels"]]
+        if (is.null(cov_labels)) {
+          warning(paste("No covariate labels found in MSM model for", model_structure, formula_name))
+          next
+        }
+        
+        # Identify spline coefficient patterns using stored spline terms
+        spline_coeff_names <- intersect(spline_terms, cov_labels)
+        
+        if (length(spline_coeff_names) == 0) {
+          warning(paste("No spline coefficients found for variable", spline_var, 
+                        "in", model_structure, formula_name))
+          next
+        }
+        
+        # Use stored df and validate against found coefficients
+        if (length(spline_coeff_names) != current_df) {
+          warning(paste("Found", length(spline_coeff_names), "spline coefficients but expected", current_df,
+                        "for", spline_var, "in", model_structure, formula_name))
+          # Use the actual number found
+          current_df <- length(spline_coeff_names)
+        }
+        
+        # Create variable grid from stored range
+        var_grid <- seq(var_range[1], var_range[2], length.out = n_breaks)
+        
+        # Set reference level (default to median of original values)
+        current_ref <- if (is.null(reference_level)) {
+          median(original_values, na.rm = TRUE)
+        } else {
+          reference_level
+        }
+        
+        # Validate reference level is within range
+        if (current_ref < var_range[1] || current_ref > var_range[2]) {
+          warning(paste("Reference level is outside observed range for", spline_var, 
+                        "in", model_structure, formula_name))
+          current_ref <- median(original_values, na.rm = TRUE)
+        }
+        
+        # Create spline basis using stored knots and boundary knots
+        spline_basis_grid <- ns(var_grid, df = current_df, 
+                                knots = knots, Boundary.knots = boundary_knots)
+        
+        spline_basis_ref <- ns(current_ref, df = current_df,
+                               knots = knots, Boundary.knots = boundary_knots)
+        
+        # Extract coefficients by transition
+        # MSM stores coefficients in estimates.t, with covariate effects starting after base rates
+        # Get the Q-matrix structure first to understand the layout
+        q_result <- qmatrix.msm(msm_model)
+        
+        # Extract the actual Q-matrix from the msm.est object
+        q_matrix <- q_result$estimates
+        
+        cat("Q-matrix class:", class(q_matrix), "\n")
+        cat("Q-matrix dimensions:", dim(q_matrix), "\n")
+        n_states <- nrow(q_matrix)
+        
+        # Count base transition rates (qbase parameters)
+        n_base_rates <- sum(q_matrix != 0 & row(q_matrix) != col(q_matrix))
+        
+        # Covariate effects start after base rates in the estimates.t vector
+        covariate_start_idx <- n_base_rates + 1
+        
+        # Debug output
+        cat("n_base_rates:", n_base_rates, "\n")
+        cat("covariate_start_idx:", covariate_start_idx, "\n")
+        cat("Length of estimates.t:", length(msm_model$paramdata$estimates.t), "\n")
+        cat("Class of estimates.t:", class(msm_model$paramdata$estimates.t), "\n")
+        
+        # Get all covariate coefficients
+        all_cov_coeffs <- msm_model$paramdata$estimates.t[covariate_start_idx:length(msm_model$paramdata$estimates.t)]
+        cat("Length of all_cov_coeffs:", length(all_cov_coeffs), "\n")
+        cat("Class of all_cov_coeffs:", class(all_cov_coeffs), "\n")
+        
+        # Identify allowed transitions
+        if (is.null(transitions)) {
+          allowed_transitions <- which(q_matrix != 0 & row(q_matrix) != col(q_matrix), arr.ind = TRUE)
+          current_transitions <- paste0(allowed_transitions[,1], " -> ", allowed_transitions[,2])
+        } else {
+          current_transitions <- transitions
+          allowed_transitions <- matrix(as.numeric(unlist(strsplit(gsub(" -> ", ",", current_transitions), ","))), 
+                                        ncol = 2, byrow = TRUE)
+        }
+        
+        # Initialize results storage for this spline variable
+        var_results <- list()
+        var_results$grid_values <- var_grid
+        var_results$reference_level <- current_ref
+        var_results$spline_var <- spline_var
+        var_results$model_structure <- model_structure
+        var_results$formula_name <- formula_name
+        var_results$transitions <- list()
+        
+        # Calculate hazard ratios for each transition
+        for (transition_idx in 1:nrow(allowed_transitions)) {
+          from_state <- allowed_transitions[transition_idx, 1]
+          to_state <- allowed_transitions[transition_idx, 2]
+          transition_name <- paste0(from_state, " -> ", to_state)
+          
+          # Extract spline coefficients for this transition
+          transition_coeffs <- numeric(current_df)
+          
+          tryCatch({
+            # Find the indices of our spline terms in the covariate labels
+            for (i in 1:current_df) {
+              spline_term <- paste0(spline_var, "_ns", i)
+              
+              # Find this term in the covariate labels
+              term_idx <- which(cov_labels == spline_term)
+              
+              if (length(term_idx) == 1) {
+                # Calculate the position in the estimates vector
+                # For constrained models (same effect across transitions), there's one coefficient per covariate
+                # For unconstrained models, there are n_transitions coefficients per covariate
+                
+                # Check constraint type from the model result
+                constraint_type <- model_result$constraint_type
+                
+                if (constraint_type == "same_across_transitions") {
+                  # Same effect across all transitions - use the single coefficient
+                  coeff_position <- term_idx
+                } else {
+                  # Different effect per transition - find the specific transition coefficient  
+                  # Position = (term_idx - 1) * n_transitions + transition_idx
+                  coeff_position <- (term_idx - 1) * nrow(allowed_transitions) + transition_idx
+                }
+                
+                # Extract the coefficient from the estimates
+                if (coeff_position <= length(all_cov_coeffs)) {
+                  transition_coeffs[i] <- all_cov_coeffs[coeff_position]
+                }
+              }
+            }
+            
+            # Calculate linear predictor at grid points
+            linear_pred_grid <- as.numeric(spline_basis_grid %*% transition_coeffs)
+            
+            # Calculate linear predictor at reference point  
+            linear_pred_ref <- as.numeric(spline_basis_ref %*% transition_coeffs)
+            
+            # Calculate hazard ratios (relative to reference)
+            log_hr <- linear_pred_grid - linear_pred_ref
+            hazard_ratios <- exp(log_hr)
+            
+            # Store results
+            var_results$transitions[[transition_name]] <- list(
+              from_state = from_state,
+              to_state = to_state,
+              coefficients = transition_coeffs,
+              linear_predictor = linear_pred_grid,
+              hazard_ratios = hazard_ratios,
+              log_hazard_ratios = log_hr
+            )
+            
+          }, error = function(e) {
+            warning(paste("Could not extract coefficients for transition", transition_name, 
+                          "in", model_structure, formula_name, ":", e$message))
+            var_results$transitions[[transition_name]] <- list(
+              from_state = from_state,
+              to_state = to_state,
+              coefficients = rep(NA, current_df),
+              linear_predictor = rep(NA, length(var_grid)),
+              hazard_ratios = rep(NA, length(var_grid)),
+              log_hazard_ratios = rep(NA, length(var_grid))
+            )
+          })
+        }
+        
+        # Add summary information
+        var_results$n_states <- n_states
+        var_results$n_transitions <- length(var_results$transitions)
+        var_results$spline_df <- current_df
+        
+        # Create a data frame for easy plotting
+        plot_data <- data.frame()
+        for (trans_name in names(var_results$transitions)) {
+          trans_data <- data.frame(
+            model_structure = model_structure,
+            formula_name = formula_name,
+            spline_variable = spline_var,
+            variable_value = var_grid,
+            hazard_ratio = var_results$transitions[[trans_name]]$hazard_ratios,
+            log_hazard_ratio = var_results$transitions[[trans_name]]$log_hazard_ratios,
+            transition = trans_name,
+            from_state = var_results$transitions[[trans_name]]$from_state,
+            to_state = var_results$transitions[[trans_name]]$to_state
+          )
+          plot_data <- rbind(plot_data, trans_data)
+        }
+        
+        var_results$plot_data <- plot_data
+        
+        # Store results for this spline variable
+        model_spline_results[[spline_var]] <- var_results
+      }
+      
+      # Store results for this model/formula combination
+      all_results[[model_structure]][[formula_name]] <- model_spline_results
+    }
   }
   
-  # Add summary information
-  results$n_states <- n_states
-  results$n_transitions <- length(results$transitions)
-  results$spline_df <- spline_df
-  
-  # Create a data frame for easy plotting
-  plot_data <- data.frame()
-  for (trans_name in names(results$transitions)) {
-    trans_data <- data.frame(
-      variable_value = var_grid,
-      hazard_ratio = results$transitions[[trans_name]]$hazard_ratios,
-      log_hazard_ratio = results$transitions[[trans_name]]$log_hazard_ratios,
-      transition = trans_name,
-      from_state = results$transitions[[trans_name]]$from_state,
-      to_state = results$transitions[[trans_name]]$to_state
-    )
-    plot_data <- rbind(plot_data, trans_data)
+  # Create combined plot data across all models and variables
+  combined_plot_data <- data.frame()
+  for (model_structure in names(all_results)) {
+    for (formula_name in names(all_results[[model_structure]])) {
+      for (spline_var in names(all_results[[model_structure]][[formula_name]])) {
+        var_plot_data <- all_results[[model_structure]][[formula_name]][[spline_var]]$plot_data
+        if (!is.null(var_plot_data) && nrow(var_plot_data) > 0) {
+          combined_plot_data <- rbind(combined_plot_data, var_plot_data)
+        }
+      }
+    }
   }
   
-  results$plot_data <- plot_data
+  # Add the combined plot data to the results
+  all_results$combined_plot_data <- combined_plot_data
   
-  class(results) <- "msm_spline_hr"
-  return(results)
+  class(all_results) <- "msm_nested_spline_hr"
+  return(all_results)
 }
 
 # Print method for the results
@@ -4335,6 +4480,11 @@ forward_selection <- function(model_data, crude_rate, candidate_covariates,
 #' @param crude_rates List of crude rates
 #' @param covariates List structure compatible with fit_msm_models (or vector for backwards compatibility)
 #' @return Nested list of fitted models with transition-specific effects
+#' Fit models with transition-specific covariate effects
+#' @param patient_data Patient data 
+#' @param crude_rates List of crude rates
+#' @param covariates List structure compatible with fit_msm_models (or vector for backwards compatibility)
+#' @return Nested list of fitted models with transition-specific effects
 fit_transition_specific_models <- function(patient_data, crude_rates, covariates) {
   
   # Convert covariates to list format if needed
@@ -4351,24 +4501,299 @@ fit_transition_specific_models <- function(patient_data, crude_rates, covariates
     patient_data = patient_data, 
     crude_rates = crude_rates, 
     covariates = covariates_list,
-    constraint = NULL  # Allow different effects per transition
+    constraint = "unconstrained"  # Explicitly request different effects per transition
   )
-  
-  # Add constraint metadata to each fitted model
-  if (!is.null(models_result)) {
-    for (model_structure in names(models_result)) {
-      for (formula_name in names(models_result[[model_structure]])) {
-        if (is.list(models_result[[model_structure]][[formula_name]])) {
-          models_result[[model_structure]][[formula_name]]$constraint_type <- "by_transition"
-        }
-      }
-    }
-  }
   
   return(models_result)
 }
 
 # Time homogeneity --------------------------------------------------------------
+
+#' Fit models with time-dependent transition rates
+#' @param patient_data Patient data
+#' @param crude_rates List of crude rates
+#' @param time_covariates Vector of time covariate specifications
+#' @param time_term Which time variable to use ("days_since_entry" or "calendar_time")
+#' @param spline_df Degrees of freedom for spline models (default: 3)
+#' @param spline_type Type of spline for time trends ("ns", "bs", "pspline")
+#' @param piecewise_breakpoints Vector of breakpoints for piecewise models
+#' @param constraint Constraint specification for time effects across transitions
+#' @return Nested list of fitted time-varying models
+fit_time_varying_models <- function(patient_data, crude_rates, 
+                                    time_covariates = c("linear", "spline", "piecewise"),
+                                    time_term = "days_since_entry",
+                                    spline_df = 3,
+                                    spline_type = "ns",
+                                    piecewise_breakpoints = NULL,
+                                    constraint = "default") {
+  
+  # Validate time_term parameter
+  if (!time_term %in% c("days_since_entry", "calendar_time")) {
+    stop("time_term must be either 'days_since_entry' or 'calendar_time'")
+  }
+  
+  # Select the appropriate time variable
+  if (time_term == "days_since_entry") {
+    time_var <- "DaysSinceEntry"
+    if (!time_var %in% names(patient_data)) {
+      stop("DaysSinceEntry column not found in patient_data")
+    }
+  } else {
+    time_var <- "CalendarTime"
+    if (!time_var %in% names(patient_data)) {
+      stop("CalendarTime column not found in patient_data. Please run add_calendar_time() first.")
+    }
+  }
+  
+  # Validate that there's sufficient time variation
+  time_summary <- patient_data %>%
+    group_by(model) %>%
+    summarise(
+      min_time = min(.data[[time_var]], na.rm = TRUE),
+      max_time = max(.data[[time_var]], na.rm = TRUE),
+      n_unique_times = length(unique(.data[[time_var]])),
+      .groups = "drop"
+    )
+  
+  insufficient_models <- time_summary %>%
+    filter(n_unique_times < 5 | (max_time - min_time) < 2) %>%
+    pull(model)
+  
+  if (length(insufficient_models) > 0) {
+    warning(paste("Insufficient time variation for models:", 
+                  paste(insufficient_models, collapse = ", ")))
+  }
+  
+  time_models <- list()
+  
+  for (time_type in time_covariates) {
+    cat("Fitting", time_type, "time-varying model using", time_term, "\n")
+    
+    if (time_type == "linear") {
+      # Linear time trend
+      models_result <- fit_msm_models(
+        patient_data = patient_data, 
+        crude_rates = crude_rates, 
+        covariates = list("linear_time" = time_var),
+        constraint = constraint
+      )
+      
+      # Add these models to the main structure with modified names
+      if (!is.null(models_result)) {
+        for (model_structure in names(models_result)) {
+          new_model_name <- paste(model_structure, "linear", time_term, sep = "_")
+          time_models[[new_model_name]] <- models_result[[model_structure]]
+          
+          # Add time modeling metadata to each formula
+          for (formula_name in names(models_result[[model_structure]])) {
+            if (is.list(models_result[[model_structure]][[formula_name]])) {
+              time_models[[new_model_name]][[formula_name]]$time_type <- "linear"
+              time_models[[new_model_name]][[formula_name]]$time_term <- time_term
+            }
+          }
+        }
+      }
+      
+    } else if (time_type == "spline") {
+      # Spline time trend using the spline wrapper
+      models_result <- fit_spline_msm_models(
+        patient_data = patient_data,
+        crude_rates = crude_rates,
+        covariates = list("spline_time" = NULL),
+        spline_vars = time_var,
+        spline_df = spline_df,
+        constraint = constraint
+      )
+      
+      # Add these models with spline-specific naming
+      if (!is.null(models_result)) {
+        for (model_structure in names(models_result)) {
+          new_model_name <- paste(model_structure, "spline", time_term, paste0("df", spline_df), sep = "_")
+          time_models[[new_model_name]] <- models_result[[model_structure]]
+          
+          # Add spline metadata
+          for (formula_name in names(models_result[[model_structure]])) {
+            if (is.list(models_result[[model_structure]][[formula_name]])) {
+              time_models[[new_model_name]][[formula_name]]$time_type <- "spline"
+              time_models[[new_model_name]][[formula_name]]$time_term <- time_term
+              time_models[[new_model_name]][[formula_name]]$spline_type <- spline_type
+            }
+          }
+        }
+      }
+      
+    } else if (time_type == "piecewise") {
+      # Piecewise constant models
+      
+      # Determine breakpoints
+      if (is.null(piecewise_breakpoints)) {
+        if (time_term == "days_since_entry") {
+          breakpoints <- c(7, 14)  # Early, middle, late periods
+        } else {
+          # For calendar time, use quantiles
+          breakpoints <- quantile(patient_data[[time_var]], c(0.33, 0.67), na.rm = TRUE)
+        }
+      } else {
+        breakpoints <- piecewise_breakpoints
+      }
+      
+      # Create time periods
+      patient_data_piece <- patient_data %>%
+        mutate(
+          time_period = cut(.data[[time_var]], 
+                            breaks = c(-Inf, breakpoints, Inf),
+                            labels = paste0("period_", seq_len(length(breakpoints) + 1)),
+                            include.lowest = TRUE)
+        ) %>%
+        # Convert to character to avoid factor issues in msm
+        mutate(time_period = as.character(time_period))
+      
+      models_result <- fit_msm_models(
+        patient_data = patient_data_piece,
+        crude_rates = crude_rates,
+        covariates = list("piecewise_time" = "time_period"),
+        constraint = constraint
+      )
+      
+      # Add piecewise models with breakpoint info
+      if (!is.null(models_result)) {
+        for (model_structure in names(models_result)) {
+          new_model_name <- paste(model_structure, "piecewise", time_term, sep = "_")
+          time_models[[new_model_name]] <- models_result[[model_structure]]
+          
+          # Add piecewise metadata
+          for (formula_name in names(models_result[[model_structure]])) {
+            if (is.list(models_result[[model_structure]][[formula_name]])) {
+              time_models[[new_model_name]][[formula_name]]$time_type <- "piecewise"
+              time_models[[new_model_name]][[formula_name]]$time_term <- time_term
+              time_models[[new_model_name]][[formula_name]]$breakpoints <- breakpoints
+            }
+          }
+        }
+      }
+      
+    } else if (time_type == "quadratic") {
+      # Quadratic time trend
+      
+      # Create quadratic term
+      patient_data_quad <- patient_data %>%
+        mutate(
+          !!paste0(time_var, "_quad") := (.data[[time_var]])^2
+        )
+      
+      quad_covariates <- c(time_var, paste0(time_var, "_quad"))
+      
+      models_result <- fit_msm_models(
+        patient_data = patient_data_quad,
+        crude_rates = crude_rates,
+        covariates = list("quadratic_time" = quad_covariates),
+        constraint = constraint
+      )
+      
+      # Add quadratic models
+      if (!is.null(models_result)) {
+        for (model_structure in names(models_result)) {
+          new_model_name <- paste(model_structure, "quadratic", time_term, sep = "_")
+          time_models[[new_model_name]] <- models_result[[model_structure]]
+          
+          # Add quadratic metadata
+          for (formula_name in names(models_result[[model_structure]])) {
+            if (is.list(models_result[[model_structure]][[formula_name]])) {
+              time_models[[new_model_name]][[formula_name]]$time_type <- "quadratic"
+              time_models[[new_model_name]][[formula_name]]$time_term <- time_term
+            }
+          }
+        }
+      }
+      
+    } else {
+      warning(paste("Unknown time covariate type:", time_type, "- skipping"))
+      next
+    }
+  }
+  
+  return(time_models)
+}
+
+#' Fit models with calendar time effects (COVID waves, seasonal patterns)
+#' @param patient_data Patient data with CalendarTime variable
+#' @param crude_rates List of crude rates
+#' @param wave_periods Named list of COVID wave periods
+#' @param seasonal Include seasonal effects (default: FALSE)
+#' @param constraint Constraint specification
+#' @return Nested list of calendar time models
+fit_calendar_time_models <- function(patient_data, crude_rates, 
+                                     wave_periods = list(
+                                       "wave1" = c(0, 100),
+                                       "wave2" = c(200, 350),
+                                       "wave3" = c(450, 600)
+                                     ),
+                                     seasonal = FALSE,
+                                     constraint = "default") {
+  
+  # Validate CalendarTime exists
+  if (!"CalendarTime" %in% names(patient_data)) {
+    stop("CalendarTime column not found. Please run add_calendar_time() first.")
+  }
+  
+  calendar_models <- list()
+  
+  # Wave-specific models
+  if (!is.null(wave_periods)) {
+    cat("Fitting COVID wave models\n")
+    
+    # Create wave indicators
+    patient_data_waves <- patient_data
+    for (wave_name in names(wave_periods)) {
+      wave_range <- wave_periods[[wave_name]]
+      patient_data_waves[[paste0("wave_", wave_name)]] <- 
+        as.numeric(patient_data_waves$CalendarTime >= wave_range[1] & 
+                     patient_data_waves$CalendarTime <= wave_range[2])
+    }
+    
+    # Create wave factor
+    patient_data_waves$covid_wave <- "baseline"
+    for (wave_name in names(wave_periods)) {
+      wave_range <- wave_periods[[wave_name]]
+      patient_data_waves$covid_wave[
+        patient_data_waves$CalendarTime >= wave_range[1] & 
+          patient_data_waves$CalendarTime <= wave_range[2]
+      ] <- wave_name
+    }
+    
+    calendar_models[["covid_waves"]] <- fit_msm_models(
+      patient_data = patient_data_waves,
+      crude_rates = crude_rates,
+      covariates = list("waves" = "covid_wave"),
+      constraint = constraint,
+      nest_name = "covid_waves"
+    )
+  }
+  
+  # Seasonal models
+  if (seasonal) {
+    cat("Fitting seasonal models\n")
+    
+    # Create seasonal terms (assuming CalendarTime is days since some reference)
+    patient_data_seasonal <- patient_data %>%
+      mutate(
+        # Convert to approximately monthly cycles
+        month_cycle = (CalendarTime %% 365.25) / 30.44,
+        season_sin = sin(2 * pi * month_cycle / 12),
+        season_cos = cos(2 * pi * month_cycle / 12)
+      )
+    
+    calendar_models[["seasonal"]] <- fit_msm_models(
+      patient_data = patient_data_seasonal,
+      crude_rates = crude_rates,
+      covariates = list("seasonal" = c("season_sin", "season_cos")),
+      constraint = constraint,
+      nest_name = "seasonal"
+    )
+  }
+  
+  return(calendar_models)
+}
 
 # Helper functions --------------------------------------------------------
 
