@@ -33,6 +33,7 @@ library(Hmisc)
 library(ggpubr)
 library(reactable)
 library(plotly)
+library(viridis)
 
 ```
 
@@ -45,17 +46,39 @@ source(here("R", "00-functions-tbl_figs.R"))
 
 pt_stg <- readRDS(here("data", "temp", "pt_stg.rds"))
 
-fitted_base_models <- readRDS(here("data", "temp", "fitted_base_models.rds"))
+# fitted_base_models <- readRDS(here("data", "temp", "fitted_base_models.rds"))
 base_models_comp <- readRDS(here("data", "temp", "base_models_comp.rds"))
 
 # Markov assumption
-fitted_models_for_markov <- readRDS(here("data", "temp", "markov_comparison_models.rds"))
-models_for_markov_comp <- readRDS(here("data", "temp", "markov_model_comp.rds"))
+# fitted_models_for_markov <- readRDS(here("data", "temp", "markov_comparison_models.rds"))
+markov_comp <- readRDS(here("data", "temp", "markov_model_comp.rds"))
+markov_pred <- readRDS(here("data", "temp", "markov_pred.rds"))
+
+# Time-homogeneity
+hospital_time_comp <- readRDS(here("data", "temp", "hospital_time_comp.rds"))
+calendar_time_comp <- readRDS(here("data", "temp", "calendar_time_comp.rds"))
+
+hospital_time_plot_data <- readRDS(here("data", "temp", "hospital_time_plot_data.rds"))
+calendar_time_plot_data <- readRDS(here("data", "temp", "calendar_time_plot_data.rds"))
+
+# Covariate effects
+univariate_comp <- readRDS(here("data", "temp", "univariate_comp.rds"))
+transition_specific_comp <- readRDS(here("data", "temp", "transition_specific_comp.rds"))
+
+spline_comp <- readRDS(here("data", "temp", "spline_comp.rds"))
+spline_effects <- readRDS(here("data", "temp", "spline_effects.rds"))
+
+# Long-stay sensitivity analysis
+truncated_model_comp <- readRDS(here("data", "temp", "truncated_model_comp.rds"))
+truncated_univar_comp <- readRDS(here("data", "temp", "truncated_univar_comp.rds"))
+
+excluded_model_comp <- readRDS(here("data", "temp", "excluded_model_comp.rds"))
+excluded_univar_comp <- readRDS(here("data", "temp", "excluded_univar_comp.rds"))
 
 ```
 
 ```{r}
-#| label: define-orders
+#| label: setup parameters for plots
 
 stage_order <- c("4", "5", "6", "7", "8", "9", "10", "11")
 state_order <- c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2", "D", "R")
@@ -280,6 +303,34 @@ kableone(modified_mat, format = "html", escape = FALSE) %>%
 
 ```
 
+## Continuous variable distributions
+
+```{r}
+#| label: data-descriptives
+#| echo: true
+
+pt_dat <- pt_stg %>%
+  dplyr::select(deid_enc_id, age, BMI, cci_score) %>%
+  distinct() %>%
+  pivot_longer(cols = c(age, BMI, cci_score), 
+               names_to = "variable", 
+               values_to = "value")
+
+ggplot(pt_dat, aes(x = value, color = variable, fill = variable)) +
+  geom_histogram() +
+  facet_wrap(~ variable, scales = "free_x", nrow = 1,
+             labeller = as_labeller(c(
+               age = "Age (years)",
+               BMI = "BMI",
+               cci_score = "CCI Score"
+             ))) +
+  labs(x = "Value", y = "Count") +
+  theme_minimal() +
+  guides(color = "none", fill = "none")
+
+```
+
+
 ## Timeline
 
 ### By hospital time
@@ -401,7 +452,7 @@ p2
 
 ## State space diagrams
 
-![State space diagram](figs/state-space.png)
+![State space diagram](images/state-space.png)
 
 ## Statetables
 
@@ -419,7 +470,8 @@ stage_df <- as.data.frame(stage_table) %>%
   mutate(across(c(from, to), as.character)) %>%
   mutate(
     from = factor(from, levels = rev(stage_order)),
-    to = factor(to, levels = stage_order)
+    to = factor(to, levels = stage_order),
+    Freq = ifelse(Freq == 0, NA, Freq)
   )
 
 ggplot(data = stage_df, aes(x = to, y = from, fill = Freq)) +
@@ -464,7 +516,8 @@ get_state_table <- function(model_name) {
     filter(from %in% state_order, to %in% state_order) %>%
     mutate(
       from = factor(from, levels = rev(state_order)),
-      to = factor(to, levels = state_order)
+      to = factor(to, levels = state_order),
+      Freq = ifelse(Freq == 0, NA, Freq)
     )
   return(st_df)
   }
@@ -514,60 +567,11 @@ combined_plot
 
 # Model Results
 
-## Model fit statistics
-
-```{r}
-#| label: model-descriptions
-#| echo: true
-
-models_summary <- base_models_comp[["model_summary"]] %>%
-  left_join(models_df, by = "model") %>%
-  dplyr::select(model_name, n_params, loglik, AIC, BIC, n_obs, optimization_method, status)
-
-kable(models_summary, 
-      col.names = c("Model", "Number of parameters", "Log-likelihood", 
-                    "AIC", "BIC", "Number of observations", 
-                    "Optimization method", "Status"),
-      digits = c(0, 0, 2, 1, 1, 0, 0, 0)) %>%
-  kable_styling(full_width = FALSE)
-
-```
-
-```{r}
-#| label: model-descriptions-plot
-#| echo: true
-
-models_summary_long <- models_summary %>%
-  dplyr::select(model_name, n_params, loglik, AIC, BIC) %>%
-  pivot_longer(cols = -model_name, names_to = "metric", values_to = "value") %>%
-  mutate(model_name = factor(model_name, levels = models_df$model_name),
-         metric = factor(metric, levels = c("n_params", "loglik", "AIC", "BIC"),
-                         labels = c("Number of parameters", "Log-likelihood", "AIC", "BIC")),
-         model_name_plot = case_when(
-           model_name == "Base model" ~ "Base model",
-           model_name == "State for history of severe" ~ "State for history\nof severe",
-           model_name == "2 moderate states" ~ "2 moderate\nstates",
-           model_name == "3 moderate states" ~ "3 moderate\nstates",
-           model_name == "2 severe states" ~ "2 severe\nstates",
-           model_name == "Simplified transitions" ~ "Simplified\ntransitions",
-           TRUE ~ "NA"
-         )) 
-
-ggplot(models_summary_long, aes(x = model_name_plot, y = value)) +
-  geom_point(size = 3) +
-  geom_line(linewidth = 1) +
-  facet_wrap(~ metric, scales = "free_y", nrow = 4) +
-  labs(x = "Metric", y = "Value", color = "Model") +
-  theme_minimal() +
-  theme(legend.position = "bottom", axis.title = element_blank())
-
-```
-
 ## Model comparisons
 
 ```{r}
 #| label: model-comparisons
-#| echo: true
+#| eval: false
 
 models_comparison <- base_models_comp$model_comparison$across_structure %>%
   drop_na() %>%
@@ -607,9 +611,8 @@ qmat_data <- qmat_data %>%
     q_conf_low = conf.low,
     q_conf_high = conf.high
   ) %>%
-  left_join(models_df, by = "model")
-
-qmat_data <- add_transition_trends(qmat_data)
+  left_join(models_df, by = "model") %>%
+  left_join(trend_types, by = c("from", "to"))
 
 x_limit <- 0.4
 
@@ -636,10 +639,11 @@ qmat_data <- qmat_data %>%
 #| echo: true
 
 kable(qmat_data %>%
+        dplyr::filter(model_name == "base_model") %>%
         dplyr::select(model_name, transition, trend, 
                       text) %>%
         arrange(model_name, transition),
-      col.names = c("Model", "Transition", "Trend", 
+      col.names = c("Model Structure", "Transition", "Trend", 
                     "Transition intensity (per day)"),
       digits = c(0, 0, 0, 3, 3, 3)) %>%
   kable_styling(full_width = FALSE) %>%
@@ -650,6 +654,8 @@ kable(qmat_data %>%
 ```{r}
 #| label: transition-intensities-plot
 #| echo: true
+#| fig.width: 7
+#| fig.height: 6
 
 ggplot(qmat_data, aes(x = q_estimate, y = fct_rev(transition), color = trend)) +
   geom_point(size = 2.5) +
@@ -666,7 +672,8 @@ ggplot(qmat_data, aes(x = q_estimate, y = fct_rev(transition), color = trend)) +
   scale_color_manual(values = trend_colors) +
   labs(x = "Fitted transition intensity (per day)", y = "Transition") +
   theme_minimal() +
-  theme(strip.text = element_text(face = "bold"))
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
 
 ```
 
@@ -715,55 +722,15 @@ pmat_data <- pmat_data %>%
 #| label: transition-probabilities-table
 #| echo: true
 
-reactable(
-  pmat_data %>%
-    dplyr::select(model_name, time_days, transition, trend, text) %>%
-    arrange(model_name, transition),
-  
-  # Enable filtering and searching
-  filterable = TRUE,
-  searchable = TRUE,
-  
-  # Column definitions
-  columns = list(
-    model_name = colDef(
-      name = "Model",
-      minWidth = 120
-    ),
-    transition = colDef(
-      name = "Transition",
-      minWidth = 100
-    ),
-    trend = colDef(
-      name = "Trend", 
-      minWidth = 100
-    ),
-    time_days = colDef(
-      name = "Time (days)",
-      minWidth = 100
-    ),
-    text = colDef(
-      name = "Transition intensity (per day)",
-      format = colFormat(digits = 3),
-      minWidth = 180
-    )
-  ),
-  
-  # Styling similar to your kable
-  striped = TRUE,
-  highlight = TRUE,
-  bordered = TRUE,
-  compact = TRUE,
-  
-  # Header styling (bold)
-  theme = reactableTheme(
-    headerStyle = list(fontWeight = "bold")
-  ),
-  
-  # Control table width
-  width = "auto",
-  resizable = TRUE
-)
+kable(pmat_data %>%
+        dplyr::filter(model_name == "base_model") %>%
+        dplyr::select(model_name, time_days, transition, trend, text) %>%
+        arrange(model_name, transition),
+      col.names = c("Model Structure", "Time (days)", "Transition", "Trend", 
+                    "Transition probability"),
+      digits = c(0, 0, 0, 0, 2, 2, 2)) %>%
+  kable_styling(full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
 
 ```
 
@@ -774,7 +741,7 @@ reactable(
 plot_pmat_by_model <- function(model_name, nrows, ncols, data = pmat_data, model_title = NULL) {
   model_data <- pmat_data[pmat_data$model == model_name, ]
   p <- ggplot(model_data, aes(x = time_days, y = p_estimate, color = trend)) +
-    geom_line(size = 1) +
+    geom_line(linewidth = 1) +
     geom_ribbon(aes(ymin = p_conf_low, ymax = p_conf_high), alpha = 0.2) +
     facet_wrap(~ transition, nrow = nrows, ncol = ncols) +
     scale_color_manual(values = trend_colors) +
@@ -793,7 +760,8 @@ pmat_plots <- models_df %>%
     plot_pmat_by_model(model, nrows, ncols, data = pmat_data, model_title = model_name)
   })
 
-pmat_plots
+pmat_plots[[1]]
+pmat_plots[[6]]
 
 ```
 
@@ -868,6 +836,40 @@ ggplot(sojourn_data,
 
 ```
 
+# Model structure
+
+## State granularity
+
+### Multiple moderate states
+
+```{r}
+
+```
+
+
+### Multiple severe states
+
+```{r}
+
+```
+
+
+## Transition structure
+
+### Simplified transitions
+
+```{r}
+
+```
+
+
+### Constrains on transitions
+
+```{r}
+
+```
+
+
 # Markov property
 
 ```{r}
@@ -878,6 +880,8 @@ markov_models_summary <- models_for_markov_comp[["model_summary"]] %>%
   mutate(model_name = case_when(model == "base_no_covariates" ~ "Base Model",
                                 model == "base_with_time_severe" ~ "Base Model +\ntime in severe\ncovariate",
                                 model == "history_severe_structure" ~ "State for history\nof severe",
+                                model == "base_with_time_severe_spline" ~ "Base Model +\ntime in severe\nspline covariate",
+                                model == "base_with_time_severe_ts" ~ "Base Model +\ntime in severe\ntransition-specific",
                                 TRUE ~ NA_character_)) %>%
   # left_join(models_df, by = "model") %>%
   dplyr::select(model_name, n_params, loglik, AIC, BIC)
@@ -896,35 +900,237 @@ markov_models_summary_long <- markov_models_summary %>%
   pivot_longer(cols = -model_name, names_to = "metric", values_to = "value") %>%
   mutate(metric = factor(metric, levels = c("n_params", "loglik", "AIC", "BIC"),
                          labels = c("Number of parameters", "Log-likelihood", "AIC", "BIC")))
+  
+markov_models_summary_long_colors <- markov_models_summary_long %>%
+  dplyr::filter(model_name!= "State for history\nof severe") %>%
+  group_by(metric) %>%
+  mutate(rank = dense_rank(value))
 
-ggplot(markov_models_summary_long, aes(x = model_name, y = value, color = model_name)) +
+markov_models_summary_long <- markov_models_summary_long %>%
+  left_join(markov_models_summary_long_colors %>%
+              dplyr::select(model_name, metric, rank),
+            by = c("model_name", "metric"))
+
+ggplot(markov_models_summary_long, aes(x = model_name, y = value, color = rank, shape = model_name)) +
   geom_point(size = 3) +
   geom_line(aes(group = model_name), linewidth = 1) +
   facet_wrap(~ metric, scales = "free_y", nrow = 4) +
-  scale_color_manual(values = c("black", "black", "grey")) +
+  scale_color_viridis(option = "mako", na.value = "darkgrey") +
+  scale_shape_manual(values = c(17, 16, 16, 16, 1)) +
   labs(x = "Covariate structure", y = "Value", color = "Model") +
   theme_minimal() +
-  theme(legend.position = "bottom", axis.title = element_blank())
+  theme(legend.position = "bottom", axis.title = element_blank()) +
+  guides(color = "none", shape = "none")
 
-markov_models_comparison_across <- models_for_markov_comp$model_comparison$across_structure %>%
-  drop_na() %>%
-  dplyr::filter(formula2 == "~ 1") %>%
-  mutate(draic_text = format_ci(draic, draic_ll, draic_ul, digits = 3),
-         drlcv_text = format_ci(drlcv, drlcv_ll, drlcv_ul, digits = 3)) %>%
-  mutate(model1 = recode(model1_struct, !!!models),
-         model2 = recode(model2_struct, !!!models)) %>%
-  mutate(preferred_model_draic = ifelse(draic < 0, model1_struct, model2_struct),
-         preferred_model_drlcv = ifelse(drlcv < 0, model1_struct, model2_struct))
+# markov_models_comparison_across <- models_for_markov_comp$model_comparison$across_structure %>%
+#   drop_na() %>%
+#   dplyr::filter(formula2 == "~ 1") %>%
+#   mutate(draic_text = format_ci(draic, draic_ll, draic_ul, digits = 3),
+#          drlcv_text = format_ci(drlcv, drlcv_ll, drlcv_ul, digits = 3)) %>%
+#   mutate(model1 = recode(model1_struct, !!!models),
+#          model2 = recode(model2_struct, !!!models)) %>%
+#   mutate(preferred_model_draic = ifelse(draic < 0, model1_struct, model2_struct),
+#          preferred_model_drlcv = ifelse(drlcv < 0, model1_struct, model2_struct))
 
-kable(markov_models_comparison_across %>%
-  dplyr::select(model1, model2, draic_text, drlcv_text, 
-                preferred_model_draic, preferred_model_drlcv),
-  col.names = c("Model 1", "Model 2", 
-                      "ΔrAIC (95% CI)", "ΔrLCV (95% CI)",
-                      "Preferred model (ΔrAIC)", "Preferred model (ΔrLCV)"),
-        digits = c(0, 0, 3, 3, 0, 0)) %>%
-  kable_styling(full_width = FALSE) %>%
-  row_spec(0, bold = TRUE)
+# kable(markov_models_comparison_across %>%
+#   dplyr::select(model1, model2, draic_text, drlcv_text, 
+#                 preferred_model_draic, preferred_model_drlcv),
+#   col.names = c("Model 1", "Model 2", 
+#                       "ΔrAIC (95% CI)", "ΔrLCV (95% CI)",
+#                       "Preferred model (ΔrAIC)", "Preferred model (ΔrLCV)"),
+#         digits = c(0, 0, 3, 3, 0, 0)) %>%
+#   kable_styling(full_width = FALSE) %>%
+#   row_spec(0, bold = TRUE)
 
 ```
 
+# Time-homogeneity
+
+```{r}
+#| label: time-homogeneity-prep
+#| echo: true
+
+time_vars <- c("time", "from_state", "to_state", "transition", "intensity", 
+               "intensity_lower", "intensity_upper", "hazard_ratio", "hr_lower", 
+               "hr_upper", "model_name", "formula_name", "time_type", "time_term")
+
+hospital_time_plot_list <- lapply(
+  hospital_time_plot_data, 
+  function(element) {
+    available_cols <- intersect(time_vars, names(element))
+    element[, available_cols, drop = FALSE]
+    })
+
+hospital_time_plot_tib <- do.call(rbind, hospital_time_plot_list)
+hospital_time_plot_tib <- hospital_time_plot_tib %>%
+  left_join(trend_types, by = join_by("from_state" == "from", "to_state" == "to"))
+
+calendar_time_plot_list <- lapply(
+  calendar_time_plot_data, 
+  function(element) {
+    available_cols <- intersect(time_vars, names(element))
+    element[, available_cols, drop = FALSE]
+    })
+
+calendar_time_plot_tib <- do.call(rbind, calendar_time_plot_list)
+calendar_time_plot_tib <- calendar_time_plot_tib %>%
+  left_join(trend_types, by = join_by("from_state" == "from", "to_state" == "to"))
+
+```
+
+```{r}
+#| label: time-homogeneity-effects
+#| echo: true
+
+models <- c("base_model_linear_days_since_entry", 
+            "base_model_spline_days_since_entry", 
+            "base_model_ts_days_since_entry",
+            "base_model_linear_calendar_time", 
+            "base_model_spline_calendar_time", 
+            "base_model_ts_calendar_time")
+
+time_plot_data <- rbind(
+  subset(hospital_time_plot_tib, model_name %in% models),
+  subset(calendar_time_plot_tib, model_name %in% models)
+)
+
+ggplot(subset(hospital_time_plot_tib, model_name == "base_model_piecewise_days_since_entry"), 
+       aes(x = time, y = intensity, color = trend)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = intensity_lower, ymax = intensity_upper), alpha = 0.2) +
+  facet_wrap(~ transition, scales = "free_y", ncol = 1) +
+  scale_color_manual(values = trend_colors) +
+  labs(x = "Days since hospital admission", y = "Transition intensity (per day)") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+
+```
+
+# Covariate effects
+
+## Univariate effects: Time-invariant
+
+```{r}
+#| label: univariate-effects data prep
+
+univariate_model_comp <- univariate_comp$model_summary %>%
+  dplyr::filter(model == "base_model") %>%
+  dplyr::select(covariate, n_params, loglik, AIC, BIC) %>%
+  mutate(effect_type = "constant")
+
+transition_model_comp <- transition_specific_comp$model_summary %>%
+  dplyr::filter(model == "base_model") %>%
+  dplyr::select(covariate, n_params, loglik, AIC, BIC) %>%
+  mutate(effect_type = "transition-specific")
+
+base_model_comp <- base_models_comp$model_summary %>%
+  dplyr::filter(model == "base_model") %>%
+  dplyr::select(n_params, loglik, AIC, BIC) %>%
+  mutate(covariate = "No covariate", effect_type = "N/A")
+
+spline_model_comp <- spline_comp$model_summary %>%
+  dplyr::select(model, n_params, loglik, AIC, BIC) %>%
+  rowwise() %>%
+  mutate(covariate = sub("\\..*", "", model)) %>%
+  dplyr::select(-model) %>%
+  mutate(effect_type = "spline")
+
+key_covariates_labels <- c("Age", "Sex", "Race", "Ethnicity", "Language", 
+                           "Insurance type", "Smoking status", "BMI", "BMI category", 
+                           "COVID-19 vaccination", "Charlson comorbidity index", "CHF", "CCI category", 
+                           "COPD", "DNR on admission")
+
+
+combined_univariate_comp <- rbind(univariate_model_comp, 
+                                  transition_model_comp,
+                                  spline_model_comp)
+combined_univariate_comp_long <- combined_univariate_comp %>%
+  rename(`N parameters` = n_params, 
+         `Log-likelihood` = loglik) %>%
+  pivot_longer(cols = -c(covariate, effect_type), 
+               names_to = "metric", 
+               values_to = "value") %>%
+  mutate(covariate = factor(covariate, levels = c(key_covariates),
+                            labels = c(key_covariates_labels)),
+         effect_type = factor(effect_type, levels = c("constant", "transition-specific", "spline"),
+                              labels = c("Constant", "Transition-specific", "Spline"))) %>%
+  group_by(metric) %>%
+  mutate(rank = dense_rank(value)) %>%
+  ungroup()
+
+base_model_comp_long <- base_model_comp %>%
+  rename(`N parameters` = n_params, 
+         `Log-likelihood` = loglik) %>%
+  dplyr::select(-c(covariate, effect_type)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "metric", 
+               values_to = "value")
+```
+
+```{r}
+#| label: univariate-effects-plot
+#| echo: true
+#| fig.width: 8
+#| fig.height: 5
+
+ggplot(combined_univariate_comp_long, 
+       aes(x = covariate, y = value, color = rank, shape = effect_type, group = effect_type)) +
+  geom_hline(data = base_model_comp_long, aes(yintercept = value), linetype = "dashed", color = "darkgrey") +
+  geom_point(size = 3, position = position_dodge(0.7)) +
+  facet_wrap(~ metric, scales = "free_y", nrow = 4) +
+  scale_color_viridis(option = "mako", na.value = "darkgrey") +
+  scale_shape_manual(values = c(1, 16, 15, 17)) +
+  labs(x = "Covariate", y = "Value", color = "Model", shape = "Effect type") +
+  theme_minimal() +
+  theme(legend.position = "bottom", axis.title = element_blank()) +
+  guides(color = "none")
+
+```
+
+## Spline effects
+
+### Transition intensities
+
+```{r}
+#| label: spline-effects-transition-intensities-plot
+#| echo: true
+
+spline_effects_plot <- spline_effects %>%
+  left_join(trend_types, by = join_by("from_state" == "from", "to_state" == "to")) %>%
+  mutate(
+    spline_variable = factor(spline_variable, levels = c("age", "BMI", "cci_score"),
+                             labels = c("Age (years)", "BMI", "CCI Score")))
+
+ggplot(spline_effects_plot, aes(x = eval_value, color = trend)) +
+  geom_line(aes(y = intensity), linewidth = 1) +
+  geom_ribbon(aes(ymin = intensity_lower, ymax = intensity_upper, fill = trend), 
+              alpha = 0.6, color = NA) +
+  facet_grid(transition ~ spline_variable, scales = "free_x") +
+  scale_color_viridis_d() +
+  scale_fill_viridis_d() +
+  labs(x = "Covariate value", y = "Transition intensity") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+```
+
+### Hazard ratios
+
+```{r}
+#| label: spline-effects-hr-plot
+#| echo: true
+
+ggplot(spline_effects_plot, aes(x = eval_value, color = trend)) +
+  geom_line(aes(y = hazard_ratio), linewidth = 1) +
+  geom_ribbon(aes(ymin = hr_lower, ymax = hr_upper, fill = trend), 
+              alpha = 0.6, color = NA) +
+  facet_grid(transition ~ spline_variable, scales = "free_x") +
+  scale_color_viridis_d() +
+  scale_fill_viridis_d() +
+  labs(x = "Covariate value", y = "Hazard Ratio") +
+  ylim(c(0, 2)) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+```

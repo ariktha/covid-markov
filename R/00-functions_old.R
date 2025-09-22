@@ -4522,8 +4522,8 @@ fit_time_varying_models <- function(patient_data, crude_rates,
       models_result <- fit_msm_models(
         patient_data = patient_data, 
         crude_rates = crude_rates, 
-        covariates = list("linear_time" = time_var)
-        # Removed nest_name to avoid extra nesting
+        covariates = list("linear_time" = time_var),
+        constraint = constraint
       )
       
       # Add these models to the main structure with modified names
@@ -4543,13 +4543,14 @@ fit_time_varying_models <- function(patient_data, crude_rates,
       }
       
     } else if (time_type == "spline") {
-      # Spline time trend using enhanced spline functionality
-      models_result <- fit_msm_models(
+      # Spline time trend using the spline wrapper
+      models_result <- fit_spline_msm_models(
         patient_data = patient_data,
         crude_rates = crude_rates,
-        covariates = list("spline_time" = time_var),
-        spline_vars = list("spline_time" = time_var),
-        spline_df = setNames(list(spline_df), time_var)
+        covariates = list("spline_time" = NULL),
+        spline_vars = time_var,
+        spline_df = spline_df,
+        constraint = constraint
       )
       
       # Add these models with spline-specific naming
@@ -4563,7 +4564,6 @@ fit_time_varying_models <- function(patient_data, crude_rates,
             if (is.list(models_result[[model_structure]][[formula_name]])) {
               time_models[[new_model_name]][[formula_name]]$time_type <- "spline"
               time_models[[new_model_name]][[formula_name]]$time_term <- time_term
-              time_models[[new_model_name]][[formula_name]]$spline_df <- spline_df
               time_models[[new_model_name]][[formula_name]]$spline_type <- spline_type
             }
           }
@@ -4599,7 +4599,8 @@ fit_time_varying_models <- function(patient_data, crude_rates,
       models_result <- fit_msm_models(
         patient_data = patient_data_piece,
         crude_rates = crude_rates,
-        covariates = list("piecewise_time" = "time_period")
+        covariates = list("piecewise_time" = "time_period"),
+        constraint = constraint
       )
       
       # Add piecewise models with breakpoint info
@@ -4633,7 +4634,8 @@ fit_time_varying_models <- function(patient_data, crude_rates,
       models_result <- fit_msm_models(
         patient_data = patient_data_quad,
         crude_rates = crude_rates,
-        covariates = list("quadratic_time" = quad_covariates)
+        covariates = list("quadratic_time" = quad_covariates),
+        constraint = constraint
       )
       
       # Add quadratic models
