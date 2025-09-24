@@ -97,15 +97,25 @@ long_stay_sensitivity <- list(
     data = excluded_data,
     crude_rates = excluded_crude_rates,
     models = excluded_models,
+<<<<<<< HEAD
     univariate_models = excluded_models_univar
     # multivar_selection = excluded_multivar
+=======
+    univariate_models = excluded_models_univar,
+    multivar_selection = excluded_multivar
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
   ),
   truncated = list(
     data = truncated_data,
     crude_rates = truncated_crude_rates,
     models = truncated_models,
+<<<<<<< HEAD
     univariate_models = truncated_models_univar
     # multivar_selection = truncated_multivar
+=======
+    univariate_models = truncated_models_univar,
+    multivar_selection = truncated_multivar
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
   )
 )
 
@@ -114,14 +124,22 @@ saveRDS(long_stay_sensitivity, here("data", "temp", "long_stay_sensitivity.rds")
 long_stay_models <- c(
   excluded_models = excluded_models,
   excluded_univariate_models = excluded_models_univar,
+<<<<<<< HEAD
   # excluded_multivar = list(base_model = excluded_multivar),
   truncated_models = truncated_models,
   truncated_univariate_models = truncated_models_univar
   # truncated_multivar = list(base_model = truncated_multivar)
+=======
+  excluded_multivar = list(base_model = excluded_multivar),
+  truncated_models = truncated_models,
+  truncated_univariate_models = truncated_models_univar,
+  truncated_multivar = list(base_model = truncated_multivar)
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
 )
 
 saveRDS(long_stay_models, here("data", "temp", "long_stay_models.rds"))
 
+<<<<<<< HEAD
 excluded_model_comp <- run_comprehensive_msm_analysis(
   excluded_models, excluded_data, excluded_crude_rates, 
   mc.cores = n.cores, analysis_config = config_core
@@ -150,6 +168,8 @@ truncated_univar_comp <- run_comprehensive_msm_analysis(
 
 saveRDS(truncated_univar_comp, here("data", "temp", "truncated_univar_comp.rds"))
 
+=======
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
 # long_stay_model_comp <- run_comprehensive_msm_analysis(
 #   long_stay_models, pt_stg, crude_rates, mc.cores = n.cores, 
 #   analysis_config = config_core_cov

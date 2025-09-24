@@ -4941,6 +4941,43 @@ fit_time_varying_models <- function(patient_data, crude_rates,
         }
       }
       
+<<<<<<< HEAD
+=======
+    } else if (time_type == "quadratic") {
+      # Quadratic time trend
+      
+      # Create quadratic term
+      patient_data_quad <- patient_data %>%
+        mutate(
+          !!paste0(time_var, "_quad") := (.data[[time_var]])^2
+        )
+      
+      quad_covariates <- c(time_var, paste0(time_var, "_quad"))
+      
+      models_result <- fit_msm_models(
+        patient_data = patient_data_quad,
+        crude_rates = crude_rates,
+        covariates = list("quadratic_time" = quad_covariates),
+        constraint = constraint
+      )
+      
+      # Add quadratic models
+      if (!is.null(models_result)) {
+        for (model_structure in names(models_result)) {
+          new_model_name <- paste(model_structure, "quadratic", time_term, sep = "_")
+          time_models[[new_model_name]] <- models_result[[model_structure]]
+          
+          # Add quadratic metadata
+          for (formula_name in names(models_result[[model_structure]])) {
+            if (is.list(models_result[[model_structure]][[formula_name]])) {
+              time_models[[new_model_name]][[formula_name]]$time_type <- "quadratic"
+              time_models[[new_model_name]][[formula_name]]$time_term <- time_term
+            }
+          }
+        }
+      }
+      
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
     } else {
       warning(paste("Unknown time covariate type:", time_type, "- skipping"))
       next
@@ -5030,6 +5067,7 @@ fit_calendar_time_models <- function(patient_data, crude_rates,
   return(calendar_models)
 }
 
+<<<<<<< HEAD
 
 ## Extract TIs and HRs from time-varying models ----------------------------
 
@@ -5836,6 +5874,8 @@ extract_all_spline_effects <- function(models_list,
   }
 }
 
+=======
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
 # Helper functions --------------------------------------------------------
 
 calc_bic_msm <- function(fitted_model) {

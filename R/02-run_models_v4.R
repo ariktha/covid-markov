@@ -171,7 +171,11 @@ if(fit_markov_models){
       "~ hx_sev_time_ns1 + hx_sev_time_ns2 + hx_sev_time_ns3" = markov_time_severe_spline[["base_model"]][["~ hx_sev_time_ns1 + hx_sev_time_ns2 + hx_sev_time_ns3"]]
     ),
     base_with_time_severe_ts = list(
+<<<<<<< HEAD
       "~ hx_sev_time" = markov_time_severe_ts[["base_model"]][["~ hx_sev_time"]]
+=======
+      "~ hx_sev_time (transition-specific)" = markov_time_severe_ts[["base_model"]][["~ hx_sev_time"]]
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
     ),
     history_severe_structure = list(
       "~ 1" = fitted_base_models[["hx_sev"]][["~ 1"]]
@@ -199,6 +203,7 @@ if(comp_markov_models){
   #   use_approximation = TRUE
   # )
   
+<<<<<<< HEAD
   # Create mapping with descriptive names
   markov_models_mapped <- list(
     "base_no_covariates" = markov_comparison_models[["base_no_covariates"]],
@@ -231,6 +236,8 @@ if(comp_markov_models){
     n_cores = n.cores
   )
   
+=======
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
   markov_pred <- calculate_predictive_performance(
     patient_data = pt_stg,
     fitted_models = markov_comparison_models,
@@ -301,7 +308,7 @@ if(fit_spline_models){
   cat("\n=== Fitting Spline Models ===\n")
   cat("Constrain: effect on all transitions same")
   individual_spline_models <- list()
-  for (covar in continuous_covariates) {
+  for (covar in continuous_covariates1) {
     cat("Fitting spline model for:", covar, "\n")
     
     cov_name <- paste0("spline_", covar)
@@ -399,7 +406,7 @@ if(comp_spline_models){
     pt_stg, 
     crude_rates = list(base_model = crude_rates[["base_model"]]), 
     mc.cores = n.cores, 
-    analysis_config = config_core_cov
+    analysis_config = config_spline
   )
   saveRDS(spline_comp, here("data", "temp", "spline_comp.rds"))
   
@@ -426,6 +433,7 @@ if(hr_spline_models){
   )
   saveRDS(spline_hrs, here("data", "temp", "spline_hrs.rds"))
   
+<<<<<<< HEAD
   spline_effects <- extract_all_spline_effects(
     models_list = spline_models,
     mc.cores = n.cores
@@ -447,6 +455,10 @@ if(hr_spline_models){
 } else {
   spline_hrs <- readRDS(here("data", "temp", "spline_hrs.rds"))
   spline_effects <- readRDS(here("data", "temp", "spline_effects.rds"))
+=======
+} else {
+  spline_hrs <- readRDS(here("data", "temp", "spline_hrs.rds"))
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
 }
 
 
@@ -490,11 +502,19 @@ if(fit_multivar_models){
     patient_data = pt_stg %>% filter(model == "base_model"),
     crude_rates = list(base_model = crude_rates[["base_model"]]),
     candidate_covariates = key_covariates,
+<<<<<<< HEAD
     # required_covariates = c("age", "BMI", "cci_cat"),
     method = "forward",
     alpha_enter = 0.05,
     # max_variables = 4,
     max_variables = length(key_covariates),
+=======
+    required_covariates = c("age", "BMI", "cci_cat"),
+    method = "forward",
+    alpha_enter = 0.05,
+    max_variables = 4,
+    # max_variables = length(key_covariates),
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
     n_cores = n.cores,
     save_intermediate = TRUE
   )
@@ -588,6 +608,7 @@ if(comp_time_vary_models){
   saveRDS(hospital_time_comp, here("data", "temp", "hospital_time_comp.rds"))
   saveRDS(calendar_time_comp, here("data", "temp", "calendar_time_comp.rds"))
   
+<<<<<<< HEAD
   hospital_plot_data <- extract_time_tis_and_hrs(
     hospital_time_models,
     pt_stg,
@@ -606,6 +627,8 @@ if(comp_time_vary_models){
   
   saveRDS(calendar_plot_data, here("data", "temp", "calendar_time_plot_data.rds"))
   
+=======
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
 } else {
   cat("\n=== Loading pre-compiled time-varying model results ===\n")
   hospital_time_comp <- readRDS(here("data", "temp", "hospital_time_comp.rds"))

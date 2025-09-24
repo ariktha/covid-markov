@@ -1,3 +1,19 @@
+<<<<<<< HEAD
+=======
+#' Extract transition trend categories for plotting
+#' @param patient_data Patient data
+#' @return Data frame with transition trend categories
+add_transition_trends <- function(patient_data) {
+  
+  
+  
+  patient_data <- patient_data %>%
+    left_join(trend_types)
+  
+  return(patient_data)
+}
+
+>>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
 #' Format confidence intervals
 format_ci <- function(estimate, lower, upper, digits = 2) {
   paste0(
