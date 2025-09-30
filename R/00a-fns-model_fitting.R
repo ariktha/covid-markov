@@ -208,617 +208,6 @@ fit_msm_models <- function(patient_data,
   return(fitted_msm_models)
 }
 
-## Helper functions for model fitting ----------------------------------------------
-
-# Helper function to preprocess data for time-varying models
-preprocess_time_varying_data <- function(patient_data, time_varying, time_variable, time_breakpoints) {
-  
-  model_names <- intersect(unique(patient_data$model), names(crude_rates))
-  processed_list <- list()
-  
-  for (modelname in model_names) {
-    model_data <- patient_data[patient_data$model == modelname, ]
-    
-    if (!is.null(time_varying)) {
-      if (time_varying == "piecewise") {
-        # Create piecewise periods
-        if (is.null(time_breakpoints)) {
-          if (time_variable == "DaysSinceEntry") {
-            time_breakpoints <- c(7, 14)
-          } else {
-            time_breakpoints <- quantile(model_data[[time_variable]], c(0.33, 0.67), na.rm = TRUE)
-          }
-        }
-        
-        model_data$time_period <- cut(model_data[[time_variable]], 
-                                      breaks = c(-Inf, time_breakpoints, Inf),
-                                      labels = paste0("period_", seq_len(length(time_breakpoints) + 1)),
-                                      include.lowest = TRUE)
-        model_data$time_period <- as.character(model_data$time_period)
-        
-      } else if (time_varying == "quadratic") {
-        # Create quadratic term
-        model_data[[paste0(time_variable, "_quad")]] <- model_data[[time_variable]]^2
-      }
-      # For linear and spline, no preprocessing needed
-    }
-    
-    processed_list[[modelname]] <- model_data
-  }
-  
-  return(processed_list)
-}
-
-# Helper function to build model specifications
-build_model_specifications <- function(covariates, spline_vars, spline_df, spline_type,
-                                       time_varying, time_variable, time_spline_df,
-                                       processed_data_list) {
-  
-  specs <- list()
-  
-  # Get sample data to create spline bases
-  sample_data <- processed_data_list[[1]]
-  
-  # Build base specification
-  spec <- list(
-    linear_covariates = covariates,
-    spline_covariates = spline_vars,
-    time_varying = time_varying,
-    time_variable = time_variable,
-    spline_metadata = list(),
-    final_covariates = character(0)
-  )
-  
-  # Add linear covariates
-  if (!is.null(covariates)) {
-    spec$final_covariates <- c(spec$final_covariates, covariates)
-  }
-  
-  # Add spline terms
-  if (!is.null(spline_vars)) {
-    for (spline_var in spline_vars) {
-      if (spline_var %in% names(sample_data)) {
-        # Create spline basis to get metadata
-        spline_basis <- tryCatch({
-          create_spline_basis(sample_data[[spline_var]], spline_df, spline_type)
-        }, error = function(e) {
-          warning(paste("Failed to create spline basis for", spline_var, ":", e$message))
-          return(NULL)
-        })
-        
-        if (is.null(spline_basis)) {
-          next  # Skip this spline variable
-        }
-        
-        # Store metadata
-        spline_terms <- paste0(spline_var, "_", spline_type, 1:spline_df)
-        spec$spline_metadata[[spline_var]] <- list(
-          original_variable = spline_var,
-          type = spline_type,
-          df = spline_df,
-          knots = attr(spline_basis, "knots"),
-          boundary_knots = attr(spline_basis, "Boundary.knots"),
-          var_range = range(sample_data[[spline_var]], na.rm = TRUE),
-          spline_terms = spline_terms
-        )
-        
-        # Add spline terms to final covariates
-        spec$final_covariates <- c(spec$final_covariates, spline_terms)
-        
-        # Add spline basis to all processed data
-        for (modelname in names(processed_data_list)) {
-          model_data <- processed_data_list[[modelname]]
-          if (spline_var %in% names(model_data)) {
-            basis <- create_spline_basis(model_data[[spline_var]], spline_df, spline_type,
-                                         knots = attr(spline_basis, "knots"),
-                                         boundary_knots = attr(spline_basis, "Boundary.knots"))
-            for (i in 1:spline_df) {
-              model_data[[spline_terms[i]]] <- basis[, i]
-            }
-            processed_data_list[[modelname]] <- model_data
-            
-            # After the spline loop, add debug:
-            cat("DEBUG: After spline processing, checking for spline columns in", modelname, "\n")
-            cat("  Columns:", paste(grep("_ns\\d+", names(processed_data_list[[modelname]]), value = TRUE), collapse = ", "), "\n")
-          }
-        }
-      }
-    }
-  }
-  
-  # Add time-varying terms
-  if (!is.null(time_varying)) {
-    if (time_varying == "linear") {
-      spec$final_covariates <- c(spec$final_covariates, time_variable)
-    } else if (time_varying == "spline") {
-      # Create time spline
-      time_spline_terms <- paste0(time_variable, "_", spline_type, 1:time_spline_df)
-      spec$final_covariates <- c(spec$final_covariates, time_spline_terms)
-      
-      # Add to spline metadata
-      sample_time_data <- sample_data[[time_variable]]
-      time_basis <- create_spline_basis(sample_time_data, time_spline_df, spline_type)
-      
-      spec$spline_metadata[[time_variable]] <- list(
-        original_variable = time_variable,
-        type = spline_type,
-        df = time_spline_df,
-        knots = attr(time_basis, "knots"),
-        boundary_knots = attr(time_basis, "Boundary.knots"),
-        var_range = range(sample_time_data, na.rm = TRUE),
-        spline_terms = time_spline_terms
-      )
-      
-      # Add to all processed data
-      for (modelname in names(processed_data_list)) {
-        model_data <- processed_data_list[[modelname]]
-        if (time_variable %in% names(model_data)) {
-          basis <- create_spline_basis(model_data[[time_variable]], time_spline_df, spline_type,
-                                       knots = attr(time_basis, "knots"),
-                                       boundary_knots = attr(time_basis, "Boundary.knots"))
-          for (i in 1:time_spline_df) {
-            model_data[[time_spline_terms[i]]] <- basis[, i]
-          }
-          processed_data_list[[modelname]] <- model_data
-        }
-      }
-    } else if (time_varying == "piecewise") {
-      spec$final_covariates <- c(spec$final_covariates, "time_period")
-    } else if (time_varying == "quadratic") {
-      spec$final_covariates <- c(spec$final_covariates, time_variable, paste0(time_variable, "_quad"))
-    }
-  }
-  
-  specs[["main"]] <- spec
-  
-  return(list(
-    specs = specs,
-    processed_data_list = processed_data_list
-  ))
-}
-
-# Helper function to create spline basis
-create_spline_basis <- function(x, df, type, knots = NULL, boundary_knots = NULL) {
-  if (type == "ns") {
-    if (!is.null(knots) && !is.null(boundary_knots)) {
-      splines::ns(x, df = df, knots = knots, Boundary.knots = boundary_knots)
-    } else {
-      splines::ns(x, df = df)
-    }
-  } else if (type == "bs") {
-    if (!is.null(knots) && !is.null(boundary_knots)) {
-      splines::bs(x, df = df, knots = knots, Boundary.knots = boundary_knots)
-    } else {
-      splines::bs(x, df = df)
-    }
-  } else {
-    stop(paste("Spline type", type, "not supported"))
-  }
-}
-
-# Helper function to create formula name
-create_formula_name <- function(covariates) {
-  if (length(covariates) == 0) {
-    return("~ 1")
-  } else {
-    return(paste("~", paste(covariates, collapse = " + ")))
-  }
-}
-
-# Helper function to create constraint specification
-create_constraint_specification <- function(covariates, constraint, n_transitions, model_data) {
-  if (constraint == "constant_across_transitions" && length(covariates) > 0) {
-    constraint_list <- list()
-    for (cov_name in covariates) {
-      if (cov_name %in% names(model_data)) {
-        if (is.factor(model_data[[cov_name]]) || is.character(model_data[[cov_name]])) {
-          factor_levels <- levels(as.factor(model_data[[cov_name]]))
-          if (length(factor_levels) > 1) {
-            for (i in 2:length(factor_levels)) {
-              level_name <- paste0(cov_name, factor_levels[i])
-              constraint_list[[level_name]] <- rep(1, n_transitions)
-            }
-          }
-        } else {
-          constraint_list[[cov_name]] <- rep(1, n_transitions)
-        }
-      }
-    }
-    return(if (length(constraint_list) == 0) NULL else constraint_list)
-  } else {
-    return(NULL)  # Transition-specific (unconstrained)
-  }
-}
-
-# Helper function to try multiple optimization methods
-try_multiple_optimizations <- function(model_data, crude_result, covariate_formula, constraint_for_msm) {
-  
-  optimization_methods <- list(
-    list(opt_method = "optim", method = "BFGS", name = "BFGS"),
-    list(opt_method = "bobyqa", name = "BOBYQA"),
-    list(opt_method = "optim", method = "Nelder-Mead", name = "Nelder-Mead")
-  )
-  
-  for (opt_config in optimization_methods) {
-    fitted_model <- tryCatch({
-      control_list <- list(fnscale = 10000, maxit = 20000, reltol = 1e-10)
-      
-      if (opt_config$opt_method == "optim" && 
-          "method" %in% names(opt_config) && 
-          !is.null(opt_config$method)) {
-        control_list$method <- opt_config$method
-      }
-      
-      msm_args <- list(
-        formula = state_num ~ DaysSinceEntry,
-        subject = quote(deid_enc_id),
-        data = model_data,
-        qmatrix = crude_result$qmat,
-        opt.method = opt_config$opt_method,
-        control = control_list
-      )
-      
-      if (!is.null(covariate_formula)) {
-        msm_args$covariates <- covariate_formula
-      }
-      
-      if (!is.null(constraint_for_msm)) {
-        msm_args$constraint <- constraint_for_msm
-      }
-      
-      result <- do.call(msm::msm, msm_args)
-      
-      # Check convergence
-      converged <- is.null(result$opt$convergence) || result$opt$convergence == 0
-      if (converged) {
-        return(list(model = result, method = opt_config$name, error = NULL))
-      } else {
-        NULL  # Try next method
-      }
-      
-    }, error = function(e) {
-      NULL  # Try next method
-    })
-    
-    if (!is.null(fitted_model)) {
-      return(fitted_model)
-    }
-  }
-  
-  # If all methods failed
-  return(list(model = NULL, method = "all_failed", error = "All optimization methods failed"))
-}
-
-# Helper function to create comprehensive metadata
-create_model_metadata <- function(spec, covariates, spline_vars, spline_df, spline_type,
-                                  time_varying, time_variable, time_breakpoints, time_spline_df,
-                                  constraint, fitted_model) {
-  
-  metadata <- list(
-    # Input specifications
-    input_covariates = covariates,
-    input_spline_vars = spline_vars,
-    input_constraint = constraint,
-    
-    # Covariate details
-    linear_covariates = spec$linear_covariates,
-    spline_covariates = spec$spline_covariates,
-    final_covariates = spec$final_covariates,
-    
-    # Spline specifications
-    spline_config = if (length(spec$spline_metadata) > 0) {
-      list(
-        spline_vars = names(spec$spline_metadata),
-        spline_metadata = spec$spline_metadata,
-        default_type = spline_type,
-        default_df = spline_df
-      )
-    } else NULL,
-    
-    # Time-varying specifications
-    time_config = if (!is.null(time_varying)) {
-      config <- list(
-        type = time_varying,
-        variable = time_variable
-      )
-      if (time_varying == "piecewise") {
-        config$breakpoints <- time_breakpoints
-      } else if (time_varying == "spline") {
-        config$spline_df <- time_spline_df
-        config$spline_type <- spline_type
-      }
-      config
-    } else NULL,
-    
-    # Constraint information
-    constraint_config = list(
-      type = constraint,
-      applied = !is.null(fitted_model$model) && !is.null(fitted_model$model$constraint)
-    ),
-    
-    # Fitting metadata
-    fit_timestamp = Sys.time(),
-    n_covariates = length(spec$final_covariates),
-    has_splines = length(spec$spline_metadata) > 0,
-    has_time_varying = !is.null(time_varying)
-  )
-  
-  return(metadata)
-}
-
-### Helper functions for univariate models -----------------------------------------
-
-# Helper function to build univariate specifications
-build_univariate_specs <- function(covariates, spline_vars) {
-  specs <- list()
-  
-  # Add linear specifications for all covariates
-  for (covar in covariates) {
-    spec_name <- paste0(covar, "_linear")
-    specs[[spec_name]] <- list(
-      variable = covar,
-      type = "linear"
-    )
-  }
-  
-  # Add spline specifications for spline_vars (even if they overlap with covariates)
-  if (!is.null(spline_vars)) {
-    for (spline_var in spline_vars) {
-      spec_name <- paste0(spline_var, "_spline")
-      specs[[spec_name]] <- list(
-        variable = spline_var,
-        type = "spline"
-      )
-    }
-  }
-  
-  return(specs)
-}
-
-#' Combine results from univariate_progressive_timeout and retry_failed_models
-#' @param univar_results Results from univariate_progressive_timeout
-#' @param retry_results Results from retry_failed_models (optional)
-#' @return Combined results list with unified structure
-combine_univariate_results <- function(univar_results, retry_results = NULL) {
-  
-  cat("=== COMBINING UNIVARIATE RESULTS ===\n")
-  
-  # Start with univar_results models
-  combined_models <- univar_results$models
-  
-  # Count initial models
-  initial_count <- 0
-  for (model_name in names(combined_models)) {
-    initial_count <- initial_count + length(combined_models[[model_name]])
-  }
-  cat("Initial models (from progressive timeout):", initial_count, "\n")
-  
-  # Add retry results if provided
-  retry_count <- 0
-  if (!is.null(retry_results) && !is.null(retry_results$models)) {
-    
-    for (model_name in names(retry_results$models)) {
-      # Initialize model structure if it doesn't exist
-      if (is.null(combined_models[[model_name]])) {
-        combined_models[[model_name]] <- list()
-      }
-      
-      # Add each formula from retry results
-      for (formula_name in names(retry_results$models[[model_name]])) {
-        
-        # Check if this formula already exists (it shouldn't, but just in case)
-        if (!is.null(combined_models[[model_name]][[formula_name]])) {
-          warning(paste("Formula", formula_name, "already exists in model", model_name, 
-                        "- keeping retry version"))
-        }
-        
-        # Add the retry result
-        combined_models[[model_name]][[formula_name]] <- 
-          retry_results$models[[model_name]][[formula_name]]
-        retry_count <- retry_count + 1
-      }
-    }
-    
-    cat("Added from retry:", retry_count, "\n")
-  }
-  
-  # Total count
-  total_count <- 0
-  for (model_name in names(combined_models)) {
-    total_count <- total_count + length(combined_models[[model_name]])
-  }
-  cat("Total combined models:", total_count, "\n\n")
-  
-  # Combine failed models
-  combined_failed <- univar_results$failed_models
-  
-  if (!is.null(retry_results) && !is.null(retry_results$retry_failed)) {
-    # Only include models that failed in retry (not successes)
-    retry_still_failed <- retry_results$retry_failed %>%
-      filter(retry_status != "success")
-    
-    if (nrow(retry_still_failed) > 0) {
-      # Remove the original failures that were retried and still failed
-      # Keep only the retry version
-      retry_specs <- paste(retry_still_failed$crude_rate_name, 
-                           retry_still_failed$spec_name, sep = "___")
-      original_specs <- paste(combined_failed$crude_rate_name, 
-                              combined_failed$spec_name, sep = "___")
-      
-      # Remove original versions of retried failures
-      combined_failed <- combined_failed %>%
-        filter(!paste(crude_rate_name, spec_name, sep = "___") %in% retry_specs)
-      
-      # Add the retry failures with updated information
-      retry_failed_formatted <- retry_still_failed %>%
-        mutate(
-          timeout_minutes = NA,  # Not applicable for retry
-          status = retry_status,
-          error_message = ifelse(is.na(error_message), 
-                                 paste("Failed on retry after", round(runtime_minutes, 1), "minutes"),
-                                 error_message)
-        ) %>%
-        select(crude_rate_name, spec_name, covariate, model_type, 
-               timeout_minutes, status, error_message)
-      
-      combined_failed <- bind_rows(combined_failed, retry_failed_formatted)
-    }
-    
-    # Remove from failed list any that succeeded in retry
-    retry_succeeded <- retry_results$retry_failed %>%
-      filter(retry_status == "success")
-    
-    if (nrow(retry_succeeded) > 0) {
-      success_specs <- paste(retry_succeeded$crude_rate_name, 
-                             retry_succeeded$spec_name, sep = "___")
-      combined_failed <- combined_failed %>%
-        filter(!paste(crude_rate_name, spec_name, sep = "___") %in% success_specs)
-    }
-  }
-  
-  cat("Failed models summary:\n")
-  cat("  Total still failed:", nrow(combined_failed), "\n")
-  if (nrow(combined_failed) > 0) {
-    cat("  By status:\n")
-    status_table <- table(combined_failed$status)
-    for (status in names(status_table)) {
-      cat("    ", status, ":", status_table[status], "\n")
-    }
-  }
-  cat("\n")
-  
-  # Combine settings (prefer retry settings if available, otherwise use original)
-  combined_settings <- univar_results$settings
-  if (!is.null(retry_results) && !is.null(retry_results$settings)) {
-    # Retry settings should be the same, but just in case
-    combined_settings <- retry_results$settings
-  }
-  
-  # Create covariate specs if not present
-  if (is.null(univar_results$covariate_specs) && !is.null(retry_results$covariate_specs)) {
-    covariate_specs <- retry_results$covariate_specs
-  } else {
-    covariate_specs <- univar_results$covariate_specs
-  }
-  
-  # Build comprehensive summary
-  summary_stats <- create_combined_summary(combined_models, combined_failed, 
-                                           univar_results, retry_results)
-  
-  # Create combined result
-  combined_results <- list(
-    models = combined_models,
-    failed_models = combined_failed,
-    covariate_specs = covariate_specs,
-    settings = combined_settings,
-    summary = summary_stats,
-    source_info = list(
-      univar_timeout_sequence = univar_results$timeout_sequence,
-      retry_performed = !is.null(retry_results),
-      combined_timestamp = Sys.time()
-    )
-  )
-  
-  # Print summary
-  cat("=== COMBINED RESULTS SUMMARY ===\n")
-  print_combined_summary(summary_stats)
-  
-  return(combined_results)
-}
-
-#' Create summary statistics for combined results
-#' @param combined_models Combined models list
-#' @param combined_failed Combined failed models data frame
-#' @param univar_results Original univar results
-#' @param retry_results Retry results (can be NULL)
-#' @return Summary statistics list
-create_combined_summary <- function(combined_models, combined_failed, 
-                                    univar_results, retry_results) {
-  
-  # Count converged models by type
-  model_counts <- data.frame(
-    model_structure = character(),
-    formula = character(),
-    covariate = character(),
-    model_type = character(),
-    status = character(),
-    source = character(),
-    stringsAsFactors = FALSE
-  )
-  
-  for (model_name in names(combined_models)) {
-    for (formula_name in names(combined_models[[model_name]])) {
-      model_entry <- combined_models[[model_name]][[formula_name]]
-      
-      # Determine source
-      source <- if (!is.null(model_entry$run_metadata$retry_attempt) && 
-                    model_entry$run_metadata$retry_attempt) {
-        "retry"
-      } else {
-        "progressive_timeout"
-      }
-      
-      model_counts <- rbind(model_counts, data.frame(
-        model_structure = model_name,
-        formula = formula_name,
-        covariate = model_entry$run_metadata$covariate %||% NA_character_,
-        model_type = model_entry$run_metadata$model_type %||% NA_character_,
-        status = model_entry$status,
-        source = source,
-        stringsAsFactors = FALSE
-      ))
-    }
-  }
-  
-  # Calculate statistics
-  total_models <- nrow(model_counts)
-  converged_models <- sum(model_counts$status == "converged")
-  from_progressive <- sum(model_counts$source == "progressive_timeout")
-  from_retry <- sum(model_counts$source == "retry")
-  
-  linear_models <- sum(model_counts$model_type == "linear" & model_counts$status == "converged")
-  spline_models <- sum(model_counts$model_type == "spline" & model_counts$status == "converged")
-  
-  # By model structure
-  by_structure <- model_counts %>%
-    filter(status == "converged") %>%
-    group_by(model_structure) %>%
-    summarise(
-      n_converged = n(),
-      n_linear = sum(model_type == "linear"),
-      n_spline = sum(model_type == "spline"),
-      .groups = "drop"
-    )
-  
-  list(
-    total_models = total_models,
-    converged_models = converged_models,
-    failed_models = nrow(combined_failed),
-    from_progressive_timeout = from_progressive,
-    from_retry = from_retry,
-    linear_models = linear_models,
-    spline_models = spline_models,
-    by_structure = by_structure,
-    model_counts = model_counts
-  )
-}
-
-#' Print combined summary
-#' @param summary_stats Summary statistics from create_combined_summary
-print_combined_summary <- function(summary_stats) {
-  cat("Total models:", summary_stats$total_models, "\n")
-  cat("  Converged:", summary_stats$converged_models, "\n")
-  cat("  Failed:", summary_stats$failed_models, "\n")
-  cat("\nBy source:\n")
-  cat("  From progressive timeout:", summary_stats$from_progressive_timeout, "\n")
-  cat("  From retry:", summary_stats$from_retry, "\n")
-  cat("\nBy type:\n")
-  cat("  Linear models:", summary_stats$linear_models, "\n")
-  cat("  Spline models:", summary_stats$spline_models, "\n")
-  cat("\nBy model structure:\n")
-  print(summary_stats$by_structure)
-}
-
 ## Univariate models with progressive timeouts -----------------------------
 
 univariate_progressive_timeout <- function(patient_data, 
@@ -1366,4 +755,682 @@ retry_failed_models <- function(failed_results,
   
   return(final_data)
 }
+
+
+## Time-varying models -------------------------------------------------------------
+
+run_all_time_models <- function(patient_data,
+                                crude_rates,
+                                covariates = NULL,
+                                spline_vars = NULL,
+                                spline_df = 3,
+                                spline_type = "ns",
+                                time_breakpoints = NULL,
+                                time_spline_df = 3,
+                                constraint = "transition_specific",
+                                mc.cores = min(8, parallel::detectCores() - 1)) {
+  
+  # Define the time-varying types and time variables to loop over
+  time_varying_options <- c("linear", "spline", "piecewise")
+  time_variables <- c("DaysSinceEntry", "CalendarTime")
+  
+  # Initialize a list to store results
+  results <- list()
+  
+  # Loop through each time variable
+  for (time_var in time_variables) {
+    
+    # Create a sublist for each time variable
+    results[[time_var]] <- list()
+    
+    # Loop through each time-varying specification
+    for (tv_type in time_varying_options) {
+      
+      # Optional: message for progress
+      message(paste("Fitting model with time variable =", time_var, 
+                    "and time-varying type =", tv_type))
+      
+      # Fit the model
+      model_result <- fit_msm_models(
+        patient_data = patient_data,
+        crude_rates = crude_rates,
+        
+        # Covariate specifications
+        covariates = covariates,
+        spline_vars = spline_vars,
+        spline_df = spline_df,
+        spline_type = spline_type,
+        
+        # Time-varying specs
+        time_varying = tv_type,
+        time_variable = time_var,
+        time_breakpoints = time_breakpoints,
+        time_spline_df = time_spline_df,
+        
+        # Constraint options
+        constraint = constraint,
+        
+        # Processing
+        mc.cores = mc.cores
+      )
+      
+      # Store in the results list
+      results[[time_var]][[tv_type]] <- model_result
+    }
+  }
+  
+  return(results)
+}
+
+
+# Helper functions -----------------------------------------------------------------
+
+## Helper functions for model fitting ----------------------------------------------
+
+# Helper function to preprocess data for time-varying models
+preprocess_time_varying_data <- function(patient_data, time_varying, time_variable, time_breakpoints) {
+  
+  model_names <- intersect(unique(patient_data$model), names(crude_rates))
+  processed_list <- list()
+  
+  for (modelname in model_names) {
+    model_data <- patient_data[patient_data$model == modelname, ]
+    
+    if (!is.null(time_varying)) {
+      if (time_varying == "piecewise") {
+        # Create piecewise periods
+        if (is.null(time_breakpoints)) {
+          if (time_variable == "DaysSinceEntry") {
+            time_breakpoints <- c(7, 14)
+          } else {
+            time_breakpoints <- quantile(model_data[[time_variable]], c(0.33, 0.67), na.rm = TRUE)
+          }
+        }
+        
+        model_data$time_period <- cut(model_data[[time_variable]], 
+                                      breaks = c(-Inf, time_breakpoints, Inf),
+                                      labels = paste0("period_", seq_len(length(time_breakpoints) + 1)),
+                                      include.lowest = TRUE)
+        model_data$time_period <- as.character(model_data$time_period)
+        
+      } else if (time_varying == "quadratic") {
+        # Create quadratic term
+        model_data[[paste0(time_variable, "_quad")]] <- model_data[[time_variable]]^2
+      }
+      # For linear and spline, no preprocessing needed
+    }
+    
+    processed_list[[modelname]] <- model_data
+  }
+  
+  return(processed_list)
+}
+
+# Helper function to build model specifications
+build_model_specifications <- function(covariates, spline_vars, spline_df, spline_type,
+                                       time_varying, time_variable, time_spline_df,
+                                       processed_data_list) {
+  
+  specs <- list()
+  
+  # Get sample data to create spline bases
+  sample_data <- processed_data_list[[1]]
+  
+  # Build base specification
+  spec <- list(
+    linear_covariates = covariates,
+    spline_covariates = spline_vars,
+    time_varying = time_varying,
+    time_variable = time_variable,
+    spline_metadata = list(),
+    final_covariates = character(0)
+  )
+  
+  # Add linear covariates
+  if (!is.null(covariates)) {
+    spec$final_covariates <- c(spec$final_covariates, covariates)
+  }
+  
+  # Add spline terms
+  if (!is.null(spline_vars)) {
+    for (spline_var in spline_vars) {
+      if (spline_var %in% names(sample_data)) {
+        # Create spline basis to get metadata
+        spline_basis <- tryCatch({
+          create_spline_basis(sample_data[[spline_var]], spline_df, spline_type)
+        }, error = function(e) {
+          warning(paste("Failed to create spline basis for", spline_var, ":", e$message))
+          return(NULL)
+        })
+        
+        if (is.null(spline_basis)) {
+          next  # Skip this spline variable
+        }
+        
+        # Store metadata
+        spline_terms <- paste0(spline_var, "_", spline_type, 1:spline_df)
+        spec$spline_metadata[[spline_var]] <- list(
+          original_variable = spline_var,
+          type = spline_type,
+          df = spline_df,
+          knots = attr(spline_basis, "knots"),
+          boundary_knots = attr(spline_basis, "Boundary.knots"),
+          var_range = range(sample_data[[spline_var]], na.rm = TRUE),
+          spline_terms = spline_terms
+        )
+        
+        # Add spline terms to final covariates
+        spec$final_covariates <- c(spec$final_covariates, spline_terms)
+        
+        # Add spline basis to all processed data
+        for (modelname in names(processed_data_list)) {
+          model_data <- processed_data_list[[modelname]]
+          if (spline_var %in% names(model_data)) {
+            basis <- create_spline_basis(model_data[[spline_var]], spline_df, spline_type,
+                                         knots = attr(spline_basis, "knots"),
+                                         boundary_knots = attr(spline_basis, "Boundary.knots"))
+            for (i in 1:spline_df) {
+              model_data[[spline_terms[i]]] <- basis[, i]
+            }
+            processed_data_list[[modelname]] <- model_data
+            
+          }
+        }
+      }
+    }
+  }
+  
+  # Add time-varying terms
+  if (!is.null(time_varying)) {
+    if (time_varying == "linear") {
+      spec$final_covariates <- c(spec$final_covariates, time_variable)
+    } else if (time_varying == "spline") {
+      # Create time spline
+      time_spline_terms <- paste0(time_variable, "_", spline_type, 1:time_spline_df)
+      spec$final_covariates <- c(spec$final_covariates, time_spline_terms)
+      
+      # Add to spline metadata
+      sample_time_data <- sample_data[[time_variable]]
+      time_basis <- create_spline_basis(sample_time_data, time_spline_df, spline_type)
+      
+      spec$spline_metadata[[time_variable]] <- list(
+        original_variable = time_variable,
+        type = spline_type,
+        df = time_spline_df,
+        knots = attr(time_basis, "knots"),
+        boundary_knots = attr(time_basis, "Boundary.knots"),
+        var_range = range(sample_time_data, na.rm = TRUE),
+        spline_terms = time_spline_terms
+      )
+      
+      # Add to all processed data
+      for (modelname in names(processed_data_list)) {
+        model_data <- processed_data_list[[modelname]]
+        if (time_variable %in% names(model_data)) {
+          basis <- create_spline_basis(model_data[[time_variable]], time_spline_df, spline_type,
+                                       knots = attr(time_basis, "knots"),
+                                       boundary_knots = attr(time_basis, "Boundary.knots"))
+          for (i in 1:time_spline_df) {
+            model_data[[time_spline_terms[i]]] <- basis[, i]
+          }
+          processed_data_list[[modelname]] <- model_data
+        }
+      }
+    } else if (time_varying == "piecewise") {
+      spec$final_covariates <- c(spec$final_covariates, "time_period")
+    } else if (time_varying == "quadratic") {
+      spec$final_covariates <- c(spec$final_covariates, time_variable, paste0(time_variable, "_quad"))
+    }
+  }
+  
+  specs[["main"]] <- spec
+  
+  return(list(
+    specs = specs,
+    processed_data_list = processed_data_list
+  ))
+}
+
+# Helper function to create spline basis
+create_spline_basis <- function(x, df, type, knots = NULL, boundary_knots = NULL) {
+  if (type == "ns") {
+    if (!is.null(knots) && !is.null(boundary_knots)) {
+      splines::ns(x, df = df, knots = knots, Boundary.knots = boundary_knots)
+    } else {
+      splines::ns(x, df = df)
+    }
+  } else if (type == "bs") {
+    if (!is.null(knots) && !is.null(boundary_knots)) {
+      splines::bs(x, df = df, knots = knots, Boundary.knots = boundary_knots)
+    } else {
+      splines::bs(x, df = df)
+    }
+  } else {
+    stop(paste("Spline type", type, "not supported"))
+  }
+}
+
+# Helper function to create formula name
+create_formula_name <- function(covariates) {
+  if (length(covariates) == 0) {
+    return("~ 1")
+  } else {
+    return(paste("~", paste(covariates, collapse = " + ")))
+  }
+}
+
+# Helper function to create constraint specification
+create_constraint_specification <- function(covariates, constraint, n_transitions, model_data) {
+  if (constraint == "constant_across_transitions" && length(covariates) > 0) {
+    constraint_list <- list()
+    for (cov_name in covariates) {
+      if (cov_name %in% names(model_data)) {
+        if (is.factor(model_data[[cov_name]]) || is.character(model_data[[cov_name]])) {
+          factor_levels <- levels(as.factor(model_data[[cov_name]]))
+          if (length(factor_levels) > 1) {
+            for (i in 2:length(factor_levels)) {
+              level_name <- paste0(cov_name, factor_levels[i])
+              constraint_list[[level_name]] <- rep(1, n_transitions)
+            }
+          }
+        } else {
+          constraint_list[[cov_name]] <- rep(1, n_transitions)
+        }
+      }
+    }
+    return(if (length(constraint_list) == 0) NULL else constraint_list)
+  } else {
+    return(NULL)  # Transition-specific (unconstrained)
+  }
+}
+
+# Helper function to try multiple optimization methods
+try_multiple_optimizations <- function(model_data, crude_result, covariate_formula, constraint_for_msm) {
+  
+  optimization_methods <- list(
+    list(opt_method = "optim", method = "BFGS", name = "BFGS"),
+    list(opt_method = "bobyqa", name = "BOBYQA"),
+    list(opt_method = "optim", method = "Nelder-Mead", name = "Nelder-Mead")
+  )
+  
+  for (opt_config in optimization_methods) {
+    fitted_model <- tryCatch({
+      control_list <- list(fnscale = 10000, maxit = 20000, reltol = 1e-10)
+      
+      if (opt_config$opt_method == "optim" && 
+          "method" %in% names(opt_config) && 
+          !is.null(opt_config$method)) {
+        control_list$method <- opt_config$method
+      }
+      
+      msm_args <- list(
+        formula = state_num ~ DaysSinceEntry,
+        subject = quote(deid_enc_id),
+        data = model_data,
+        qmatrix = crude_result$qmat,
+        opt.method = opt_config$opt_method,
+        control = control_list
+      )
+      
+      if (!is.null(covariate_formula)) {
+        msm_args$covariates <- covariate_formula
+      }
+      
+      if (!is.null(constraint_for_msm)) {
+        msm_args$constraint <- constraint_for_msm
+      }
+      
+      result <- do.call(msm::msm, msm_args)
+      
+      # Check convergence
+      converged <- is.null(result$opt$convergence) || result$opt$convergence == 0
+      if (converged) {
+        return(list(model = result, method = opt_config$name, error = NULL))
+      } else {
+        NULL  # Try next method
+      }
+      
+    }, error = function(e) {
+      NULL  # Try next method
+    })
+    
+    if (!is.null(fitted_model)) {
+      return(fitted_model)
+    }
+  }
+  
+  # If all methods failed
+  return(list(model = NULL, method = "all_failed", error = "All optimization methods failed"))
+}
+
+# Helper function to create comprehensive metadata
+create_model_metadata <- function(spec, covariates, spline_vars, spline_df, spline_type,
+                                  time_varying, time_variable, time_breakpoints, time_spline_df,
+                                  constraint, fitted_model) {
+  
+  metadata <- list(
+    # Input specifications
+    input_covariates = covariates,
+    input_spline_vars = spline_vars,
+    input_constraint = constraint,
+    
+    # Covariate details
+    linear_covariates = spec$linear_covariates,
+    spline_covariates = spec$spline_covariates,
+    final_covariates = spec$final_covariates,
+    
+    # Spline specifications
+    spline_config = if (length(spec$spline_metadata) > 0) {
+      list(
+        spline_vars = names(spec$spline_metadata),
+        spline_metadata = spec$spline_metadata,
+        default_type = spline_type,
+        default_df = spline_df
+      )
+    } else NULL,
+    
+    # Time-varying specifications
+    time_config = if (!is.null(time_varying)) {
+      config <- list(
+        type = time_varying,
+        variable = time_variable
+      )
+      if (time_varying == "piecewise") {
+        config$breakpoints <- time_breakpoints
+      } else if (time_varying == "spline") {
+        config$spline_df <- time_spline_df
+        config$spline_type <- spline_type
+      }
+      config
+    } else NULL,
+    
+    # Constraint information
+    constraint_config = list(
+      type = constraint,
+      applied = !is.null(fitted_model$model) && !is.null(fitted_model$model$constraint)
+    ),
+    
+    # Fitting metadata
+    fit_timestamp = Sys.time(),
+    n_covariates = length(spec$final_covariates),
+    has_splines = length(spec$spline_metadata) > 0,
+    has_time_varying = !is.null(time_varying)
+  )
+  
+  return(metadata)
+}
+
+### Helper functions for univariate models -----------------------------------------
+
+# Helper function to build univariate specifications
+build_univariate_specs <- function(covariates, spline_vars) {
+  specs <- list()
+  
+  # Add linear specifications for all covariates
+  for (covar in covariates) {
+    spec_name <- paste0(covar, "_linear")
+    specs[[spec_name]] <- list(
+      variable = covar,
+      type = "linear"
+    )
+  }
+  
+  # Add spline specifications for spline_vars (even if they overlap with covariates)
+  if (!is.null(spline_vars)) {
+    for (spline_var in spline_vars) {
+      spec_name <- paste0(spline_var, "_spline")
+      specs[[spec_name]] <- list(
+        variable = spline_var,
+        type = "spline"
+      )
+    }
+  }
+  
+  return(specs)
+}
+
+#' Combine results from univariate_progressive_timeout and retry_failed_models
+#' @param univar_results Results from univariate_progressive_timeout
+#' @param retry_results Results from retry_failed_models (optional)
+#' @return Combined results list with unified structure
+combine_univariate_results <- function(univar_results, retry_results = NULL) {
+  
+  cat("=== COMBINING UNIVARIATE RESULTS ===\n")
+  
+  # Start with univar_results models
+  combined_models <- univar_results$models
+  
+  # Count initial models
+  initial_count <- 0
+  for (model_name in names(combined_models)) {
+    initial_count <- initial_count + length(combined_models[[model_name]])
+  }
+  cat("Initial models (from progressive timeout):", initial_count, "\n")
+  
+  # Add retry results if provided
+  retry_count <- 0
+  if (!is.null(retry_results) && !is.null(retry_results$models)) {
+    
+    for (model_name in names(retry_results$models)) {
+      # Initialize model structure if it doesn't exist
+      if (is.null(combined_models[[model_name]])) {
+        combined_models[[model_name]] <- list()
+      }
+      
+      # Add each formula from retry results
+      for (formula_name in names(retry_results$models[[model_name]])) {
+        
+        # Check if this formula already exists (it shouldn't, but just in case)
+        if (!is.null(combined_models[[model_name]][[formula_name]])) {
+          warning(paste("Formula", formula_name, "already exists in model", model_name, 
+                        "- keeping retry version"))
+        }
+        
+        # Add the retry result
+        combined_models[[model_name]][[formula_name]] <- 
+          retry_results$models[[model_name]][[formula_name]]
+        retry_count <- retry_count + 1
+      }
+    }
+    
+    cat("Added from retry:", retry_count, "\n")
+  }
+  
+  # Total count
+  total_count <- 0
+  for (model_name in names(combined_models)) {
+    total_count <- total_count + length(combined_models[[model_name]])
+  }
+  cat("Total combined models:", total_count, "\n\n")
+  
+  # Combine failed models
+  combined_failed <- univar_results$failed_models
+  
+  if (!is.null(retry_results) && !is.null(retry_results$retry_failed)) {
+    # Only include models that failed in retry (not successes)
+    retry_still_failed <- retry_results$retry_failed %>%
+      filter(retry_status != "success")
+    
+    if (nrow(retry_still_failed) > 0) {
+      # Remove the original failures that were retried and still failed
+      # Keep only the retry version
+      retry_specs <- paste(retry_still_failed$crude_rate_name, 
+                           retry_still_failed$spec_name, sep = "___")
+      original_specs <- paste(combined_failed$crude_rate_name, 
+                              combined_failed$spec_name, sep = "___")
+      
+      # Remove original versions of retried failures
+      combined_failed <- combined_failed %>%
+        filter(!paste(crude_rate_name, spec_name, sep = "___") %in% retry_specs)
+      
+      # Add the retry failures with updated information
+      retry_failed_formatted <- retry_still_failed %>%
+        mutate(
+          timeout_minutes = NA,  # Not applicable for retry
+          status = retry_status,
+          error_message = ifelse(is.na(error_message), 
+                                 paste("Failed on retry after", round(runtime_minutes, 1), "minutes"),
+                                 error_message)
+        ) %>%
+        select(crude_rate_name, spec_name, covariate, model_type, 
+               timeout_minutes, status, error_message)
+      
+      combined_failed <- bind_rows(combined_failed, retry_failed_formatted)
+    }
+    
+    # Remove from failed list any that succeeded in retry
+    retry_succeeded <- retry_results$retry_failed %>%
+      filter(retry_status == "success")
+    
+    if (nrow(retry_succeeded) > 0) {
+      success_specs <- paste(retry_succeeded$crude_rate_name, 
+                             retry_succeeded$spec_name, sep = "___")
+      combined_failed <- combined_failed %>%
+        filter(!paste(crude_rate_name, spec_name, sep = "___") %in% success_specs)
+    }
+  }
+  
+  cat("Failed models summary:\n")
+  cat("  Total still failed:", nrow(combined_failed), "\n")
+  if (nrow(combined_failed) > 0) {
+    cat("  By status:\n")
+    status_table <- table(combined_failed$status)
+    for (status in names(status_table)) {
+      cat("    ", status, ":", status_table[status], "\n")
+    }
+  }
+  cat("\n")
+  
+  # Combine settings (prefer retry settings if available, otherwise use original)
+  combined_settings <- univar_results$settings
+  if (!is.null(retry_results) && !is.null(retry_results$settings)) {
+    # Retry settings should be the same, but just in case
+    combined_settings <- retry_results$settings
+  }
+  
+  # Create covariate specs if not present
+  if (is.null(univar_results$covariate_specs) && !is.null(retry_results$covariate_specs)) {
+    covariate_specs <- retry_results$covariate_specs
+  } else {
+    covariate_specs <- univar_results$covariate_specs
+  }
+  
+  # Build comprehensive summary
+  summary_stats <- create_combined_summary(combined_models, combined_failed, 
+                                           univar_results, retry_results)
+  
+  # Create combined result
+  combined_results <- list(
+    models = combined_models,
+    failed_models = combined_failed,
+    covariate_specs = covariate_specs,
+    settings = combined_settings,
+    summary = summary_stats,
+    source_info = list(
+      univar_timeout_sequence = univar_results$timeout_sequence,
+      retry_performed = !is.null(retry_results),
+      combined_timestamp = Sys.time()
+    )
+  )
+  
+  # Print summary
+  cat("=== COMBINED RESULTS SUMMARY ===\n")
+  print_combined_summary(summary_stats)
+  
+  return(combined_results)
+}
+
+#' Create summary statistics for combined results
+#' @param combined_models Combined models list
+#' @param combined_failed Combined failed models data frame
+#' @param univar_results Original univar results
+#' @param retry_results Retry results (can be NULL)
+#' @return Summary statistics list
+create_combined_summary <- function(combined_models, combined_failed, 
+                                    univar_results, retry_results) {
+  
+  # Count converged models by type
+  model_counts <- data.frame(
+    model_structure = character(),
+    formula = character(),
+    covariate = character(),
+    model_type = character(),
+    status = character(),
+    source = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (model_name in names(combined_models)) {
+    for (formula_name in names(combined_models[[model_name]])) {
+      model_entry <- combined_models[[model_name]][[formula_name]]
+      
+      # Determine source
+      source <- if (!is.null(model_entry$run_metadata$retry_attempt) && 
+                    model_entry$run_metadata$retry_attempt) {
+        "retry"
+      } else {
+        "progressive_timeout"
+      }
+      
+      model_counts <- rbind(model_counts, data.frame(
+        model_structure = model_name,
+        formula = formula_name,
+        covariate = model_entry$run_metadata$covariate %||% NA_character_,
+        model_type = model_entry$run_metadata$model_type %||% NA_character_,
+        status = model_entry$status,
+        source = source,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  # Calculate statistics
+  total_models <- nrow(model_counts)
+  converged_models <- sum(model_counts$status == "converged")
+  from_progressive <- sum(model_counts$source == "progressive_timeout")
+  from_retry <- sum(model_counts$source == "retry")
+  
+  linear_models <- sum(model_counts$model_type == "linear" & model_counts$status == "converged")
+  spline_models <- sum(model_counts$model_type == "spline" & model_counts$status == "converged")
+  
+  # By model structure
+  by_structure <- model_counts %>%
+    filter(status == "converged") %>%
+    group_by(model_structure) %>%
+    summarise(
+      n_converged = n(),
+      n_linear = sum(model_type == "linear"),
+      n_spline = sum(model_type == "spline"),
+      .groups = "drop"
+    )
+  
+  list(
+    total_models = total_models,
+    converged_models = converged_models,
+    failed_models = nrow(combined_failed),
+    from_progressive_timeout = from_progressive,
+    from_retry = from_retry,
+    linear_models = linear_models,
+    spline_models = spline_models,
+    by_structure = by_structure,
+    model_counts = model_counts
+  )
+}
+
+#' Print combined summary
+#' @param summary_stats Summary statistics from create_combined_summary
+print_combined_summary <- function(summary_stats) {
+  cat("Total models:", summary_stats$total_models, "\n")
+  cat("  Converged:", summary_stats$converged_models, "\n")
+  cat("  Failed:", summary_stats$failed_models, "\n")
+  cat("\nBy source:\n")
+  cat("  From progressive timeout:", summary_stats$from_progressive_timeout, "\n")
+  cat("  From retry:", summary_stats$from_retry, "\n")
+  cat("\nBy type:\n")
+  cat("  Linear models:", summary_stats$linear_models, "\n")
+  cat("  Spline models:", summary_stats$spline_models, "\n")
+  cat("\nBy model structure:\n")
+  print(summary_stats$by_structure)
+}
+
 

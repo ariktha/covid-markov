@@ -1,4 +1,4 @@
-## Extract model results ----------------------------------------------
+# Extract model results ----------------------------------------------
 
 tidy_msm_models <- function(fitted_msm_models) {
   
@@ -549,6 +549,217 @@ tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
   }
   
   return(tidied_hrs)
+}
+
+#' Calculate hazard ratios for spline covariates relative to reference value
+#' @param fitted_msm_models Nested list from fit_msm_models
+#' @param patient_data Original patient data (to get variable ranges)
+#' @param n_points Number of evaluation points along each spline (default: 20)
+#' @param reference_level Named list of reference values, or NULL for median (default: NULL)
+#' @param ci_method Method for confidence intervals: "delta" or "normal" (default: "delta")
+#' @return Data frame with variable values, HRs, CIs, by transition and model
+calculate_spline_hazard_ratios <- function(fitted_msm_models,
+                                           patient_data,
+                                           n_points = 20,
+                                           reference_level = NULL,
+                                           ci_method = "delta") {
+  
+  # Validate inputs
+  validate_model_structure(fitted_msm_models)
+  
+  if (!ci_method %in% c("delta", "normal")) {
+    stop("ci_method must be 'delta' or 'normal'")
+  }
+  
+  cat("=== CALCULATING SPLINE HAZARD RATIOS ===\n")
+  
+  all_results <- list()
+  
+  # Loop through models
+  for (model_structure in names(fitted_msm_models)) {
+    for (formula_name in names(fitted_msm_models[[model_structure]])) {
+      
+      model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
+      
+      # Skip failed models
+      if (is.null(model_entry) || 
+          (is.list(model_entry) && !is.null(model_entry$status) && 
+           model_entry$status == "failed")) {
+        next
+      }
+      
+      fitted_model <- model_entry$fitted_model
+      metadata <- model_entry$metadata
+      
+      if (is.null(fitted_model) || is.null(metadata)) next
+      
+      # Check if model has splines
+      if (!extract_has_splines_from_metadata(metadata)) {
+        next
+      }
+      
+      cat("Processing:", model_structure, "|", formula_name, "\n")
+      
+      # Get spline variables and metadata
+      spline_config <- metadata$spline_config
+      if (is.null(spline_config) || is.null(spline_config$spline_metadata)) {
+        next
+      }
+      
+      # Filter patient data for this model
+      model_data <- patient_data %>% filter(model == model_structure)
+      
+      # Process each spline variable
+      for (spline_var in names(spline_config$spline_metadata)) {
+        
+        var_meta <- spline_config$spline_metadata[[spline_var]]
+        
+        cat("  Variable:", spline_var, "\n")
+        
+        # Get variable range from data
+        var_values <- model_data[[spline_var]]
+        if (is.null(var_values) || all(is.na(var_values))) {
+          warning(paste("Variable", spline_var, "not found in data"))
+          next
+        }
+        
+        var_range <- range(var_values, na.rm = TRUE)
+        
+        # Set reference level
+        ref_value <- if (!is.null(reference_level) && spline_var %in% names(reference_level)) {
+          reference_level[[spline_var]]
+        } else {
+          median(var_values, na.rm = TRUE)
+        }
+        
+        cat("    Range: [", var_range[1], ",", var_range[2], "], Reference:", ref_value, "\n")
+        
+        # Create evaluation grid
+        eval_grid <- seq(var_range[1], var_range[2], length.out = n_points)
+        
+        # Get base variables (non-spline covariates to hold constant)
+        base_variables <- extract_base_variables_from_metadata(metadata)
+        other_vars <- setdiff(base_variables, spline_var)
+        
+        # Create covariate list for reference value
+        ref_covariates <- list()
+        ref_covariates[[spline_var]] <- ref_value
+        
+        # Set other covariates to their medians/modes
+        for (other_var in other_vars) {
+          if (other_var %in% names(model_data)) {
+            if (is.numeric(model_data[[other_var]])) {
+              ref_covariates[[other_var]] <- median(model_data[[other_var]], na.rm = TRUE)
+            } else {
+              # For factors, use most common level
+              ref_covariates[[other_var]] <- names(sort(table(model_data[[other_var]]), 
+                                                        decreasing = TRUE))[1]
+            }
+          }
+        }
+        
+        # Calculate hazard ratios at reference (should be ~1)
+        ref_hazards <- tryCatch({
+          hazard.msm(fitted_model, covariates = ref_covariates, 
+                     ci = ci_method, hazard.scale = 1)
+        }, error = function(e) {
+          warning(paste("Failed to calculate reference hazards:", e$message))
+          return(NULL)
+        })
+        
+        if (is.null(ref_hazards)) next
+        
+        # Calculate hazard ratios at each grid point
+        grid_results <- list()
+        
+        for (i in seq_along(eval_grid)) {
+          eval_value <- eval_grid[i]
+          
+          # Create covariate list for this evaluation point
+          eval_covariates <- ref_covariates
+          eval_covariates[[spline_var]] <- eval_value
+          
+          # Get hazards at this point
+          eval_hazards <- tryCatch({
+            hazard.msm(fitted_model, covariates = eval_covariates,
+                       ci = ci_method, hazard.scale = 1)
+          }, error = function(e) {
+            NULL
+          })
+          
+          if (is.null(eval_hazards)) next
+          
+          # Calculate HR relative to reference for each transition
+          for (cov_name in names(eval_hazards)) {
+            
+            # Get reference hazard for this covariate/transition
+            ref_hr <- ref_hazards[[cov_name]]
+            eval_hr <- eval_hazards[[cov_name]]
+            
+            # Extract transition info from covariate name
+            # Format is typically "variablename.transition" or just shows transition
+            transitions <- rownames(eval_hr)
+            
+            for (trans in transitions) {
+              
+              # Calculate HR relative to reference
+              # HR = exp(log(eval) - log(ref))
+              hr <- eval_hr[trans, "HR"] / ref_hr[trans, "HR"]
+              
+              # For CIs, use ratio of the HR bounds
+              hr_lower <- eval_hr[trans, "L"] / ref_hr[trans, "U"]
+              hr_upper <- eval_hr[trans, "U"] / ref_hr[trans, "L"]
+              
+              grid_results[[length(grid_results) + 1]] <- data.frame(
+                model = model_structure,
+                formula = formula_name,
+                spline_variable = spline_var,
+                variable_value = eval_value,
+                reference_value = ref_value,
+                transition = trans,
+                hazard_ratio = hr,
+                hr_lower = hr_lower,
+                hr_upper = hr_upper,
+                log_hr = log(hr),
+                log_hr_lower = log(hr_lower),
+                log_hr_upper = log(hr_upper),
+                stringsAsFactors = FALSE
+              )
+            }
+          }
+        }
+        
+        if (length(grid_results) > 0) {
+          var_results <- do.call(rbind, grid_results)
+          
+          # Add metadata
+          var_results$constraint_type <- extract_constraint_type_from_metadata(metadata)
+          var_results$spline_df <- var_meta$df
+          var_results$spline_type <- var_meta$type
+          
+          combo_key <- paste(model_structure, formula_name, spline_var, sep = "___")
+          all_results[[combo_key]] <- var_results
+        }
+      }
+    }
+  }
+  
+  if (length(all_results) == 0) {
+    warning("No spline hazard ratios calculated")
+    return(data.frame())
+  }
+  
+  # Combine all results
+  final_results <- do.call(rbind, all_results)
+  rownames(final_results) <- NULL
+  
+  cat("=== COMPLETED ===\n")
+  cat("Calculated HRs for", length(unique(final_results$spline_variable)), 
+      "spline variables\n")
+  cat("Across", length(unique(final_results$model)), "model structures\n")
+  cat("Total rows:", nrow(final_results), "\n")
+  
+  return(final_results)
 }
 
 ### State prevalence --------------------------------------------------
@@ -1462,7 +1673,7 @@ generate_patient_predictions_unified <- function(patient_id, baseline_covs, init
   })
 }
 
-### Model fit: residuals --------------------------------------------
+# Model fit: ------------------------------------------------------------
 
 #' Calculate transition residuals using pre-computed transition probabilities
 #' @param fitted_msm_models Nested list of fitted models: fitted_models[[model_structure]][[formula]]
@@ -1656,7 +1867,7 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
   return(final_residuals)
 }
 
-### Compare models --------------------------------------------
+# Compare models --------------------------------------------
 
 #' Comprehensive model comparison combining within and across structure comparisons
 #' @param fitted_models Nested list of fitted MSM models
@@ -2234,7 +2445,7 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
     
     # P-matrix parameters  
     pmats = list(
-      t_values = c(1, 7, 14, 30),
+      t_values = time_vec,
       covariates_list = NULL,
       mc.cores = mc.cores
     ),
@@ -2246,7 +2457,7 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
     
     # Prevalence parameters
     prevalence = list(
-      time_points = c(1, 7, 14, 30),
+      time_points = time_vec,
       covariates_list = NULL,
       ci = TRUE,
       ci_method = "normal",
@@ -2262,7 +2473,7 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
     # Cross-validation parameters
     cv = list(
       k_folds = 3,
-      prediction_times = c(1, 7, 14, 30),
+      prediction_times = time_vec,
       stratify_by = "final_state",
       calibration_covariates = NULL,
       calibration_subgroups = NULL,
@@ -2474,7 +2685,7 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
 }
 
 
-# Print analysis ----------------------------------------------------------
+## Print analysis ----------------------------------------------------------
 
 #' Create a summary of analysis results
 #' @param results Output from run_comprehensive_msm_analysis

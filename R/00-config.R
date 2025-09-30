@@ -24,6 +24,8 @@ options(readr.show_col_types = FALSE)
 n.cores = 10
 # setOption("future.globals.maxSize", 891289600) # 850MB
 
+time_vec <- c(1, 7, 15, 30)
+
 # Covariate specifications
 
 continuous_covariates <- c("age", "cci_score", "BMI")
@@ -42,38 +44,38 @@ key_covariates_labels <- c("Age", "Sex", "Race", "Ethnicity", "Language",
 
 run_data_setup <- FALSE
 
-fit_no_cov_models <- FALSE
+do_no_cov <- FALSE
+fit_no_cov_models <- TRUE
 comp_no_cov_models <- TRUE
 
 ## Check Markov assumption ----
 
+do_markov <- FALSE
 fit_markov_models <- TRUE
 comp_markov_models <- TRUE
 
 ## Covariate effects ----------
 
+do_univar <- TRUE
 univar_timeout_times <- c(1, 5, 10)
 fit_univar_models <- TRUE
 refit_failed_univar_models <- TRUE
 comp_univar_models <- TRUE
 
-fit_spline_models <- TRUE
-comp_spline_models <- TRUE
-hr_spline_models <- TRUE
-
+# Not implemented
+do_multivar <- FALSE
 fit_multivar_models <- TRUE
 comp_multivar_models <- TRUE
 
+do_constrained_trans <- TRUE
 fit_trans_models <- TRUE
 comp_trans_models <- TRUE
 
 ## Time-homogeneity ----------
 
+do_time_inhomogeneity <- TRUE
 fit_time_vary_models <- TRUE
 comp_time_vary_models <- TRUE
-
-fit_trans_models <- TRUE
-comp_trans_models <- TRUE
 
 ## Long stay sensitivity analysis ----------
 
@@ -82,12 +84,6 @@ run_long_stay_analysis <- TRUE
 # Config for results compilation --------------------------------
 
 config_core <- list(
-  comparison = list(include_across = FALSE)
-)
-
-config_core_cov <- list(
-  prevalence = list(skip = TRUE),
-  residuals = list(skip = TRUE),
   comparison = list(include_across = FALSE)
 )
 
