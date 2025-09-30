@@ -2412,17 +2412,9 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
       
       if (debug) cat("Processing:", model_structure, "with formula:", formula_name, "\n")
       
-      model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
-      
-      # Check if this is a failed model
-      if (is.null(model_entry) || 
-          (is.list(model_entry) && !is.null(model_entry$status) && model_entry$status == "failed")) {
-        if (debug) cat("Skipping failed model:", model_structure, formula_name, "\n")
-        next
-      }
+      fitted_model <- fitted_msm_models[[model_structure]][[formula_name]]$fitted_model
       
       # Extract the fitted model object
-      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in calculate_transition_residuals")
       if (is.null(fitted_model)) next
       
       if (!inherits(fitted_model, "msm")) {
@@ -2454,7 +2446,6 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
         filter(!is.na(to_state), time_diff > 0) %>%
         ungroup()
       
-      # Fix: NOW standardize the state columns after observed_transitions is created
       observed_transitions <- standardize_state_columns(observed_transitions, fitted_model)
       
       if (debug) {
@@ -2475,7 +2466,10 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
       temp_nested_model[[model_structure]] <- list()
       temp_nested_model[[model_structure]][[formula_name]] <- list(
         fitted_model = fitted_model,
-        status = "converged"
+        status = "converged",
+        optimization_method = NULL,
+        metadata = NULL,
+        error_message = NULL
       )
       
       expected_probs_df <- tryCatch({
@@ -3186,7 +3180,7 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
     
     # Prevalence parameters
     prevalence = list(
-      time_points = seq(1, 30, by = 1),
+      time_points = c(1, 7, 14, 30),
       covariates_list = NULL,
       ci = TRUE,
       ci_method = "normal",
@@ -3201,8 +3195,8 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
     
     # Cross-validation parameters
     cv = list(
-      k_folds = 5,
-      prediction_times = seq(1, 15, by = 2),
+      k_folds = 3,
+      prediction_times = c(1, 7, 14, 30),
       stratify_by = "final_state",
       calibration_covariates = NULL,
       calibration_subgroups = NULL,
@@ -5067,8 +5061,6 @@ fit_calendar_time_models <- function(patient_data, crude_rates,
   return(calendar_models)
 }
 
-<<<<<<< HEAD
-
 ## Extract TIs and HRs from time-varying models ----------------------------
 
 extract_time_tis_and_hrs <- function(models_list, 
@@ -5874,8 +5866,7 @@ extract_all_spline_effects <- function(models_list,
   }
 }
 
-=======
->>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
+
 # Helper functions --------------------------------------------------------
 
 calc_bic_msm <- function(fitted_model) {
