@@ -567,33 +567,6 @@ combined_plot
 
 # Model Results
 
-## Model comparisons
-
-```{r}
-#| label: model-comparisons
-#| eval: false
-
-models_comparison <- base_models_comp$model_comparison$across_structure %>%
-  drop_na() %>%
-  mutate(draic_text = format_ci(draic, draic_ll, draic_ul, digits = 1),
-         drlcv_text = format_ci(drlcv, drlcv_ll, drlcv_ul, digits = 1)) %>%
-  mutate(model1 = recode(model1_struct, !!!models),
-         model2 = recode(model2_struct, !!!models)) %>%
-  mutate(preferred_model_draic = ifelse(draic < 0, model1_struct, model2_struct),
-         preferred_model_drlcv = ifelse(drlcv < 0, model1_struct, model2_struct))
-
-kable(models_comparison %>% 
-        dplyr::select(model1, model2, draic_text, drlcv_text, 
-                      preferred_model_draic, preferred_model_drlcv),
-      col.names = c("Model 1", "Model 2", 
-                    "ΔrAIC (95% CI)", "ΔrLCV (95% CI)",
-                    "Preferred model (ΔrAIC)", "Preferred model (ΔrLCV)"),
-      digits = c(0, 0, 1, 1, 0, 0)) %>%
-  kable_styling(full_width = FALSE) %>%
-  row_spec(0, bold = TRUE)
-
-```
-
 ## Transition intensity estimates
 
 ```{r}
@@ -837,6 +810,31 @@ ggplot(sojourn_data,
 ```
 
 # Model structure
+
+```{r}
+#| label: model-comparisons
+#| eval: false
+
+models_comparison <- base_models_comp$model_comparison$across_structure %>%
+  drop_na() %>%
+  mutate(draic_text = format_ci(draic, draic_ll, draic_ul, digits = 1),
+         drlcv_text = format_ci(drlcv, drlcv_ll, drlcv_ul, digits = 1)) %>%
+  mutate(model1 = recode(model1_struct, !!!models),
+         model2 = recode(model2_struct, !!!models)) %>%
+  mutate(preferred_model_draic = ifelse(draic < 0, model1_struct, model2_struct),
+         preferred_model_drlcv = ifelse(drlcv < 0, model1_struct, model2_struct))
+
+kable(models_comparison %>% 
+        dplyr::select(model1, model2, draic_text, drlcv_text, 
+                      preferred_model_draic, preferred_model_drlcv),
+      col.names = c("Model 1", "Model 2", 
+                    "ΔrAIC (95% CI)", "ΔrLCV (95% CI)",
+                    "Preferred model (ΔrAIC)", "Preferred model (ΔrLCV)"),
+      digits = c(0, 0, 1, 1, 0, 0)) %>%
+  kable_styling(full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+```
 
 ## State granularity
 

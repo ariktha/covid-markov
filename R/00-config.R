@@ -25,7 +25,6 @@ n.cores = 10
 # setOption("future.globals.maxSize", 891289600) # 850MB
 
 # Covariate specifications
-<<<<<<< HEAD
 
 continuous_covariates <- c("age", "cci_score", "BMI")
 
@@ -42,33 +41,8 @@ key_covariates_labels <- c("Age", "Sex", "Race", "Ethnicity", "Language",
 # Sections to run ----------------------------------------------------------
 
 run_data_setup <- FALSE
-=======
->>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
 
-continuous_covariates <- c("age", "cci_score", "BMI")
-
-<<<<<<< HEAD
-## Check Markov assumption ----
-
-fit_markov_models <- FALSE
-comp_markov_models <- FALSE
-
-## Covariate effects ----------
-
-fit_univar_models <- FALSE
-comp_univar_models <- FALSE
-=======
-key_covariates <- c("age", "sex", "race", "ethnicity", "language", 
-                    "insurance_type", "smoking", "BMI", "bmi_cat", 
-                    "COVID_vax", "cci_score", "chf", "cci_cat", 
-                    "copd", "dnr_on_admit")
-
-
-# Sections to run ----------------------------------------------------------
-
-run_data_setup <- TRUE
-
-fit_no_cov_models <- TRUE
+fit_no_cov_models <- FALSE
 comp_no_cov_models <- TRUE
 
 ## Check Markov assumption ----
@@ -78,9 +52,10 @@ comp_markov_models <- TRUE
 
 ## Covariate effects ----------
 
+univar_timeout_times <- c(1, 5, 10)
 fit_univar_models <- TRUE
+refit_failed_univar_models <- TRUE
 comp_univar_models <- TRUE
->>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
 
 fit_spline_models <- TRUE
 comp_spline_models <- TRUE
@@ -89,17 +64,6 @@ hr_spline_models <- TRUE
 fit_multivar_models <- TRUE
 comp_multivar_models <- TRUE
 
-<<<<<<< HEAD
-fit_trans_models <- FALSE
-comp_trans_models <- FALSE
-
-## Time-homogeneity ----------
-
-fit_time_vary_models <- FALSE
-comp_time_vary_models <- FALSE
-
-run_long_stay_analysis <- FALSE
-=======
 fit_trans_models <- TRUE
 comp_trans_models <- TRUE
 
@@ -108,14 +72,17 @@ comp_trans_models <- TRUE
 fit_time_vary_models <- TRUE
 comp_time_vary_models <- TRUE
 
+fit_trans_models <- TRUE
+comp_trans_models <- TRUE
+
+## Long stay sensitivity analysis ----------
+
 run_long_stay_analysis <- TRUE
->>>>>>> c6e20c8b285831bacedd41ae31ed081e6d34a949
 
 # Config for results compilation --------------------------------
 
 config_core <- list(
-  prevalence = list(skip = TRUE),
-  residuals = list(skip = TRUE)
+  comparison = list(include_across = FALSE)
 )
 
 config_core_cov <- list(
