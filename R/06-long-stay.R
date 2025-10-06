@@ -5,10 +5,15 @@ library(tidyverse)
 library(msm)
 
 source(here("R", "00-config.R"))
-source(here("R", "00-functions.R"))
+source(here("R", "00a-fns-model_fitting.R"))
+source(here("R", "00b-fns-model_eval.R"))
 
 source(here("R", "00-qmat_setup.R"))
+crude_rates <- readRDS(here("data", "temp", "crude_rates.rds"))
+
 pt_stg <- readRDS(here("data", "temp", "pt_stg.rds"))
+
+key_covariates <- c("age", "sex")
 
 # Identify long-stay patients (>30 days)
 long_stay_patients <- pt_stg %>%

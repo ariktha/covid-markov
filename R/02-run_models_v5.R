@@ -8,6 +8,7 @@ source(here("R", "00-config.R"))
 # source(here("R", "00-functions.R"))
 source(here("R", "00a-fns-model_fitting.R"))
 source(here("R", "00b-fns-model_eval.R"))
+source(here("R", "00c-fns-predictive_performance.R"))
 
 # Data prep ---------------------------------------------------------------
 
@@ -65,7 +66,7 @@ cat("N observations:", nrow(pt_stg), "\n")
 
 # Base models (no covariates) --------------------------------------------
 
-if(do_no_covar){
+if(do_no_cov){
   
   if(fit_no_cov_models){
     cat("\n=== Fitting base models (No covariates) ===\n")
