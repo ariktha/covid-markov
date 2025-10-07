@@ -19,7 +19,6 @@
 #' @return Path to saved summary results file
 cv_msm_models <- function(fitted_models,
                           patient_data,
-                          crude_rates,
                           k_folds = 5,
                           stratify_by = "final_state",
                           prediction_horizon = 365,
@@ -29,17 +28,16 @@ cv_msm_models <- function(fitted_models,
                           verbose = TRUE) {
   
   ### Input validation ----
-
+  
   if (verbose) cat("\n=== Validating Inputs ===\n")
   
-  # Check fitted_models structure
+  # [Keep all the existing validation code - same as before]
   if (!is.list(fitted_models) || length(fitted_models) == 0) {
     stop("fitted_models must be a non-empty list")
   }
   
   validate_model_structure(fitted_models)
   
-  # Check patient_data
   required_cols <- c("deid_enc_id", "model", "state", "DaysSinceEntry")
   missing_cols <- setdiff(required_cols, names(patient_data))
   if (length(missing_cols) > 0) {
@@ -50,14 +48,7 @@ cv_msm_models <- function(fitted_models,
     stop("patient_data must be a non-empty data.frame")
   }
   
-  # Check crude_rates
-  if (!is.list(crude_rates) || length(crude_rates) == 0) {
-    stop("crude_rates must be a non-empty list")
-  }
-  
-  # Check stratify_by variable exists
   if (!stratify_by %in% names(patient_data)) {
-    # Try to create it
     if (verbose) cat("Creating", stratify_by, "variable from data...\n")
     patient_data <- patient_data %>%
       group_by(deid_enc_id) %>%
@@ -69,13 +60,11 @@ cv_msm_models <- function(fitted_models,
     }
   }
   
-  # Check output directory
   if (!dir.exists(output_dir)) {
     if (verbose) cat("Creating output directory:", output_dir, "\n")
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   }
   
-  # Check parameters
   if (k_folds < 2 || k_folds > 20) {
     stop("k_folds must be between 2 and 20")
   }
@@ -85,16 +74,8 @@ cv_msm_models <- function(fitted_models,
   }
   
   ### Setup ----
-
+  
   start_time <- Sys.time()
-  
-  # Extract model specifications
-  model_specs <- extract_model_specifications(fitted_models)
-  n_models <- nrow(model_specs)
-  
-  if (n_models == 0) {
-    stop("No valid models found in fitted_models")
-  }
   
   # Create stratified folds
   fold_assignments <- create_stratified_folds(
@@ -106,17 +87,32 @@ cv_msm_models <- function(fitted_models,
   
   n_patients <- length(unique(fold_assignments$deid_enc_id))
   
+  ### Create bundles ----
+  
+  bundles <- create_model_bundles(
+    fitted_models = fitted_models,
+    patient_data = patient_data,
+    fold_assignments = fold_assignments,
+    prediction_horizon = prediction_horizon,
+    k_folds = k_folds,
+    verbose = verbose
+  )
+  
+  n_models <- length(bundles)
+  n_ready <- sum(sapply(bundles, function(b) b$status == "ready"))
+  
   if (verbose) {
     cat("\n=== Cross-Validation Setup ===\n")
-    cat("Models to evaluate:", n_models, "\n")
-    cat("Folds:", k_folds, "\n")
+    cat("Total bundles:", n_models, "\n")
+    cat("Ready to process:", n_ready, "\n")
     cat("Patients:", n_patients, "\n")
+    cat("Folds:", k_folds, "\n")
     cat("Prediction horizon:", prediction_horizon, "days\n")
-    cat("Stratified by:", stratify_by, "\n")
     cat("Parallel:", ifelse(parallel, paste("Yes (", n_cores, "cores)"), "No"), "\n\n")
   }
   
-  # Setup parallel processing if requested
+  ### Setup parallel processing ----
+  
   if (parallel && n_cores > 1) {
     if (!requireNamespace("future", quietly = TRUE) || 
         !requireNamespace("future.apply", quietly = TRUE)) {
@@ -129,55 +125,29 @@ cv_msm_models <- function(fitted_models,
       on.exit(plan(sequential), add = TRUE)
     }
   }
-
-  ### Run CV for each model -----
-
+  
+  ### Run CV for each bundle ----
   
   cv_function <- if (parallel) future.apply::future_lapply else lapply
   
-  all_results <- cv_function(1:n_models, function(i) {
-    
-    spec <- model_specs[i, ]
+  all_results <- cv_function(bundles, function(bundle) {
     
     if (verbose) {
-      cat(sprintf("[%d/%d] %s | %s\n", i, n_models, spec$model, spec$formula))
+      cat(sprintf("Processing %s | %s\n", bundle$model_structure, bundle$formula_name))
     }
     
     tryCatch({
-      # Run CV for this model
-      result <- cv_single_model(
-        model_structure = spec$model,
-        formula_name = spec$formula,
-        fitted_models = fitted_models,
-        patient_data = patient_data,
-        crude_rates = crude_rates,
-        fold_assignments = fold_assignments,
-        prediction_horizon = prediction_horizon,
-        k_folds = k_folds
+      cv_single_model_from_bundle(
+        bundle = bundle,
+        output_dir = output_dir,
+        verbose = FALSE
       )
-      
-      # Save to file immediately
-      filename <- sprintf("cv_%s_%s.rds", 
-                          make.names(spec$model), 
-                          make.names(spec$formula))
-      filepath <- file.path(output_dir, filename)
-      
-      saveRDS(result, filepath)
-      
-      # Return just the summary (not full predictions) to save memory
-      list(
-        model = spec$model,
-        formula = spec$formula,
-        summary = result$summary,
-        file = filepath,
-        status = "success"
-      )
-      
     }, error = function(e) {
-      warning(sprintf("Model %s | %s failed: %s", spec$model, spec$formula, e$message))
+      warning(sprintf("Bundle %s | %s failed: %s", 
+                      bundle$model_structure, bundle$formula_name, e$message))
       list(
-        model = spec$model,
-        formula = spec$formula,
+        model = bundle$model_structure,
+        formula = bundle$formula_name,
         summary = NULL,
         file = NA,
         status = "failed",
@@ -186,9 +156,7 @@ cv_msm_models <- function(fitted_models,
     })
   })
   
-
-  ### Compile and save results -----
-
+  ### Compile and save results ----
   
   if (verbose) cat("\n=== Compiling Results ===\n")
   
@@ -203,7 +171,9 @@ cv_msm_models <- function(fitted_models,
   })
   
   # Count successes/failures
-  n_success <- sum(sapply(all_results, function(x) x$status == "success"))
+  n_success <- sum(sapply(all_results, function(x) {
+    !is.null(x$metadata) && x$metadata$status == "success"
+  }))
   n_failed <- n_models - n_success
   
   # Save combined summary
@@ -221,8 +191,9 @@ cv_msm_models <- function(fitted_models,
     stratify_by = stratify_by,
     runtime = as.numeric(difftime(Sys.time(), start_time, units = "mins")),
     timestamp = Sys.time(),
-    individual_files = sapply(all_results, function(x) x$file),
-    failed_models = all_results[sapply(all_results, function(x) x$status == "failed")]
+    failed_models = all_results[sapply(all_results, function(x) {
+      is.null(x$metadata) || x$metadata$status != "success"
+    })]
   )
   
   saveRDS(metadata, file.path(output_dir, "cv_metadata.rds"))
@@ -237,8 +208,9 @@ cv_msm_models <- function(fitted_models,
   return(invisible(summary_file))
 }
 
-
 # Helper functions -----
+
+
 
 state_to_num <- function(state_name, fitted_model) {
   all_states <- rownames(fitted_model$qmodel$qmatrix)
@@ -341,41 +313,183 @@ create_stratified_folds <- function(patient_data, k_folds, stratify_by, verbose 
   return(fold_assignments)
 }
 
-#' Run CV for a single model across all folds
-cv_single_model <- function(model_structure,
-                            formula_name,
-                            fitted_models,
-                            patient_data,
-                            crude_rates,
-                            fold_assignments,
-                            prediction_horizon,
-                            k_folds) {
+#' Create lightweight bundles for parallel CV processing
+#' 
+#' @param fitted_models Full nested list of fitted models
+#' @param patient_data Full patient dataset
+#' @param crude_rates Full crude rates list
+#' @param fold_assignments Fold assignments for all patients
+#' @param prediction_horizon Prediction horizon in days
+#' @param k_folds Number of folds
+#' @param verbose Print progress
+#' 
+#' @return List of bundles, one per model-formula combination
+create_model_bundles <- function(fitted_models,
+                                 patient_data,
+                                 fold_assignments,
+                                 prediction_horizon,
+                                 k_folds,
+                                 verbose = FALSE) {
   
-  # Extract original fitted model and metadata
-  model_entry <- fitted_models[[model_structure]][[formula_name]]
+  if (verbose) cat("Creating model bundles for parallel processing...\n")
   
-  if (is.null(model_entry)) {
-    stop("Model entry is NULL")
+  bundles <- list()
+  bundle_count <- 0
+  failed_count <- 0
+  
+  for (model_name in names(fitted_models)) {
+    for (formula_name in names(fitted_models[[model_name]])) {
+      
+      bundle_count <- bundle_count + 1
+      
+      # Try to extract components
+      bundle_result <- tryCatch({
+        
+        # Extract model entry
+        model_entry <- fitted_models[[model_name]][[formula_name]]
+        
+        # Check if failed model
+        if (is.null(model_entry) || 
+            (is.list(model_entry) && !is.null(model_entry$status) && 
+             model_entry$status == "failed")) {
+          stop("Model failed to fit")
+        }
+        
+        # Extract metadata
+        metadata <- if (is.list(model_entry) && "metadata" %in% names(model_entry)) {
+          model_entry$metadata
+        } else {
+          list()
+        }
+        
+        model_structure <- metadata$model_structure
+        
+        # Filter patient data for this model structure
+        model_data <- patient_data %>%
+          dplyr::filter(model == model_structure)
+        
+        if (nrow(model_data) == 0) {
+          stop("No patient data for this model structure")
+        }
+        
+        # Filter fold assignments for patients in this model
+        model_fold_assignments <- fold_assignments %>%
+          filter(deid_enc_id %in% unique(model_data$deid_enc_id))
+        
+        if (nrow(model_fold_assignments) == 0) {
+          stop("No fold assignments for this model structure")
+        }
+        
+        # Extract crude rates for this model structure
+        if (is.null(model_entry$crude_rates)) {
+          stop("Crude rates not found for this model")
+        }
+        
+        crude_rates_for_model <- model_entry$crude_rates
+        
+        # Create successful bundle
+        list(
+          status = "ready",
+          model_structure = model_structure,
+          formula_name = formula_name,
+          fitted_model_entry = model_entry,
+          metadata = metadata,
+          model_data = model_data,
+          crude_rates = crude_rates_for_model,
+          fold_assignments = model_fold_assignments,
+          prediction_horizon = prediction_horizon,
+          k_folds = k_folds,
+          error = NULL
+        )
+        
+      }, error = function(e) {
+        # Create failed bundle
+        failed_count <<- failed_count + 1
+        
+        list(
+          status = "failed",
+          model_structure = model_structure,
+          formula_name = formula_name,
+          fitted_model_entry = NULL,
+          metadata = NULL,
+          model_data = NULL,
+          crude_rates = NULL,
+          fold_assignments = NULL,
+          prediction_horizon = prediction_horizon,
+          k_folds = k_folds,
+          error = e$message
+        )
+      })
+      
+      bundles[[bundle_count]] <- bundle_result
+    }
   }
   
-  # Extract metadata
-  metadata <- if (is.list(model_entry) && "metadata" %in% names(model_entry)) {
-    model_entry$metadata
-  } else {
-    list()
+  # Add names for easier tracking
+  names(bundles) <- sapply(bundles, function(b) {
+    paste(b$model_structure, b$formula_name, sep = "___")
+  })
+  
+  n_ready <- sum(sapply(bundles, function(b) b$status == "ready"))
+  
+  if (verbose) {
+    cat("Created", length(bundles), "bundles\n")
+    cat("  Ready:", n_ready, "\n")
+    cat("  Failed:", failed_count, "\n")
+    
+    # Estimate memory savings
+    original_size <- object.size(fitted_models) + object.size(patient_data)
+    bundle_size <- object.size(bundles)
+    cat("  Original data size:", format(original_size, units = "MB"), "\n")
+    cat("  Bundled data size:", format(bundle_size, units = "MB"), "\n")
+    cat("  Size per bundle:", format(bundle_size / length(bundles), units = "MB"), "\n")
   }
   
-  # Filter data for this model structure
-  model_data <- patient_data %>% 
-    filter(model == model_structure)
+  return(bundles)
+}
+
+#' Run CV for a single model using a bundle
+#' 
+#' @param bundle A bundle created by create_model_bundles()
+#' @param output_dir Directory to save individual results
+#' @param verbose Print progress
+#' 
+#' @return List with summary, fold_metrics, predictions, errors, metadata
+cv_single_model_from_bundle <- function(bundle, 
+                                        output_dir = NULL,
+                                        verbose = FALSE) {
   
-  if (nrow(model_data) == 0) {
-    stop("No data for model structure: ", model_structure)
+  # Check if bundle is already failed
+  if (bundle$status == "failed") {
+    return(list(
+      model = bundle$model_structure,
+      formula = bundle$formula_name,
+      summary = NULL,
+      fold_metrics = NULL,
+      predictions = NULL,
+      errors = data.frame(error = bundle$error),
+      metadata = list(
+        model = bundle$model_structure,
+        formula = bundle$formula_name,
+        status = "failed",
+        error = bundle$error
+      )
+    ))
   }
   
-  # Get fold assignments for patients in this model
-  model_fold_assignments <- fold_assignments %>%
-    filter(deid_enc_id %in% unique(model_data$deid_enc_id))
+  # Extract components from bundle
+  model_structure <- bundle$model_structure
+  formula_name <- bundle$formula_name
+  model_data <- bundle$model_data
+  fold_assignments <- bundle$fold_assignments
+  crude_rates <- bundle$crude_rates
+  metadata <- bundle$metadata
+  prediction_horizon <- bundle$prediction_horizon
+  k_folds <- bundle$k_folds
+  
+  if (verbose) {
+    cat(sprintf("Processing %s | %s\n", model_structure, formula_name))
+  }
   
   # Run each fold
   fold_results <- list()
@@ -387,15 +501,16 @@ cv_single_model <- function(model_structure,
       cv_single_fold(
         fold_num = fold_num,
         model_data = model_data,
-        fold_assignments = model_fold_assignments,
-        crude_rates = crude_rates[[model_structure]],
+        fold_assignments = fold_assignments,
+        crude_rates = crude_rates,
         metadata = metadata,
         prediction_horizon = prediction_horizon,
         verbose = FALSE
       )
     }, error = function(e) {
-      # ADD MORE DETAIL HERE:
-      cat(sprintf("    Fold %d FAILED: %s\n", fold_num, e$message))
+      if (verbose) {
+        cat(sprintf("  Fold %d FAILED: %s\n", fold_num, e$message))
+      }
       
       fold_errors[[fold_num]] <<- list(
         fold = fold_num,
@@ -403,13 +518,31 @@ cv_single_model <- function(model_structure,
       )
       NULL
     })
+    
+    if (!is.null(fold_result)) {
+      fold_results[[fold_num]] <- fold_result
+    }
   }
   
   # Check if any folds succeeded
   n_succeeded <- length(fold_results)
   
   if (n_succeeded == 0) {
-    stop("All folds failed for this model")
+    return(list(
+      model = model_structure,
+      formula = formula_name,
+      summary = NULL,
+      fold_metrics = NULL,
+      predictions = NULL,
+      errors = do.call(rbind, fold_errors),
+      metadata = list(
+        model = model_structure,
+        formula = formula_name,
+        k_folds = k_folds,
+        n_folds_succeeded = 0,
+        status = "all_folds_failed"
+      )
+    ))
   }
   
   # Combine fold results
@@ -445,8 +578,35 @@ cv_single_model <- function(model_structure,
       brier_severe = mean(brier_severe, na.rm = TRUE)
     )
   
+  # Save to file if output_dir provided
+  if (!is.null(output_dir)) {
+    filename <- sprintf("cv_%s_%s.rds", 
+                        make.names(model_structure), 
+                        make.names(formula_name))
+    filepath <- file.path(output_dir, filename)
+    
+    full_result <- list(
+      summary = summary_stats,
+      fold_metrics = all_metrics,
+      predictions = all_predictions,
+      errors = if (length(fold_errors) > 0) do.call(rbind, fold_errors) else NULL,
+      metadata = list(
+        model = model_structure,
+        formula = formula_name,
+        k_folds = k_folds,
+        n_folds_succeeded = n_succeeded,
+        prediction_horizon = prediction_horizon,
+        status = "success"
+      )
+    )
+    
+    saveRDS(full_result, filepath)
+  }
+  
   # Return comprehensive results
   list(
+    model = model_structure,
+    formula = formula_name,
     summary = summary_stats,
     fold_metrics = all_metrics,
     predictions = all_predictions,
@@ -456,7 +616,8 @@ cv_single_model <- function(model_structure,
       formula = formula_name,
       k_folds = k_folds,
       n_folds_succeeded = n_succeeded,
-      prediction_horizon = prediction_horizon
+      prediction_horizon = prediction_horizon,
+      status = "success"
     )
   )
 }
@@ -469,6 +630,12 @@ cv_single_fold <- function(fold_num,
                            metadata,
                            prediction_horizon,
                            verbose = FALSE) {
+  
+  model_structure <- metadata$model_structure
+  
+  if (is.null(model_structure)) {
+    stop("Fold ", fold_num, ": model_structure not found in metadata")
+  }
   
   # Split into train/test
   train_patients <- fold_assignments$deid_enc_id[fold_assignments$fold != fold_num]
@@ -491,25 +658,31 @@ cv_single_fold <- function(fold_num,
     model_name <- unique(train_data$model)[1]
     temp_qmat_list <- list()
     temp_qmat_list[[model_name]] <- crude_rates$qmat
-    calc_crude_init_rates(train_data, temp_qmat_list)
+    recalc_rates <- calc_crude_init_rates(train_data, temp_qmat_list)
+    recalc_rates
   }, error = function(e) {
     stop("Failed to calculate crude rates for fold ", fold_num, ": ", e$message)
   })
   
   # Refit model on training data
   fitted_model_fold <- tryCatch({
-    refit_model_from_metadata(train_data, train_crude_rates, metadata)
+    refit_model_from_metadata(
+      train_data = train_data,
+      model_structure = model_structure,  # Pass from bundle
+      metadata = metadata, 
+      train_crude_rates = train_crude_rates
+    )
   }, error = function(e) {
     stop("Failed to refit model for fold ", fold_num, ": ", e$message)
   })
   
   # Extract the fitted model
-  model_structure_name <- names(fitted_model_fold)[1]
-  formula_key <- names(fitted_model_fold[[model_structure_name]])[1]
+  model_name_key <- names(fitted_model_fold)[1]
+  formula_key <- names(fitted_model_fold[[model_name_key]])[1]
   
   fitted_model <- extract_fitted_model(
     fitted_model_fold, 
-    model_structure_name, 
+    model_name_key,
     formula_key,
     paste("in fold", fold_num)
   )
@@ -539,16 +712,13 @@ cv_single_fold <- function(fold_num,
     group_by(deid_enc_id) %>%
     summarise(
       initial_state_name = first(state),
-      initial_state_num = state_to_num(first(state), fitted_model),  # ADD
+      initial_state_num = state_to_num(first(state), fitted_model),  
       total_los = max(DaysSinceEntry, na.rm = TRUE),
       days_severe = sum(grepl("S", state), na.rm = TRUE),
       died = any(state == "D"),
       ever_severe = any(grepl("S", state)),
       .groups = "drop"
     )
-  
-  test_outcomes$initial_state_num <- sapply(test_outcomes$initial_state_name, 
-                                            function(s) state_to_num(s, fitted_model))
   
   # Get baseline covariates
   baseline_covariates <- extract_baseline_covariates(test_data, metadata)
@@ -581,7 +751,7 @@ cv_single_fold <- function(fold_num,
 }
 
 #' Refit model from metadata specifications
-refit_model_from_metadata <- function(train_data, train_crude_rates, metadata) {
+refit_model_from_metadata <- function(train_data, model_structure, metadata, train_crude_rates) {
   
   # Extract parameters with safe defaults
   covariates <- metadata$input_covariates
@@ -603,7 +773,7 @@ refit_model_from_metadata <- function(train_data, train_crude_rates, metadata) {
   time_varying <- if (!is.null(metadata$time_config)) {
     metadata$time_config$type
   } else {
-    NULL
+    NA_character_
   }
   
   time_variable <- if (!is.null(metadata$time_config)) {
@@ -618,19 +788,28 @@ refit_model_from_metadata <- function(train_data, train_crude_rates, metadata) {
     NULL
   }
   
-  # Call fit_msm_models
-  fit_msm_models(
-    patient_data = train_data,
-    crude_rates = train_crude_rates,
-    covariates = covariates,
-    spline_vars = spline_vars,
+  # Get model structure from metadata
+  model_structure <- metadata$model_structure
+  
+  # Create model_specs tibble for this single model
+  refit_specs <- tibble(
+    model_name = model_structure,
+    model_structure = model_structure,
+    covariates = list(covariates),
+    spline_vars = list(spline_vars),
     spline_df = spline_df,
     spline_type = spline_type,
     time_varying = time_varying,
     time_variable = time_variable,
-    time_breakpoints = time_breakpoints,
-    constraint = constraint,
-    mc.cores = 1  # Already parallelizing at model level
+    time_breakpoints = list(time_breakpoints),
+    constraint = constraint
+  )
+  
+  fit_msm_models(
+    patient_data = train_data,
+    crude_rates = train_crude_rates,
+    model_specs = refit_specs,
+    mc.cores = 1
   )
 }
 
@@ -755,10 +934,8 @@ predict_patient_outcomes <- function(fitted_model,
   has_covariates <- ncol(covariates) > 0 && any(!is.na(covariates))
   cov_list <- if (has_covariates) as.list(covariates) else NULL
   
-  # =============================================================================
   # PREDICTION 1: Total Length of Stay
-  # =============================================================================
-  
+
   total_los <- tryCatch({
     if (has_covariates) {
       result <- totlos.msm(fitted_model, start = initial_state_num, covariates = cov_list)
@@ -774,10 +951,8 @@ predict_patient_outcomes <- function(fitted_model,
     NA_real_
   })
   
-  # =============================================================================
   # PREDICTION 2: Days in Severe States
-  # =============================================================================
-  
+
   days_severe <- if (length(severe_state_nums) > 0) {
     tryCatch({
       if (has_covariates) {
@@ -804,10 +979,8 @@ predict_patient_outcomes <- function(fitted_model,
     0  # No severe states in this model
   }
   
-  # =============================================================================
   # PREDICTION 3 & 4: Death and Severe Probabilities (use same pmatrix)
-  # =============================================================================
-  
+
   pmat_result <- tryCatch({
     if (has_covariates) {
       pmatrix.msm(fitted_model, t = prediction_horizon, covariates = cov_list)

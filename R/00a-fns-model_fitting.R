@@ -55,21 +55,18 @@ calc_crude_init_rates <- function(patient_data, qmat_list) {
 
 fit_msm_models <- function(patient_data, 
                            crude_rates, 
+                           model_specs,
                            
-                           # Covariate specifications
+                           # Default specifications (used when columns missing from model_specs)
                            covariates = NULL,
                            spline_vars = NULL,
                            spline_df = 3,
                            spline_type = "ns",
-                           
-                           # Time-varying specifications
-                           time_varying = NULL,  # "linear", "spline", "piecewise", "quadratic"
-                           time_variable = "DaysSinceEntry", # or "CalendarTime"
+                           time_varying = NULL,
+                           time_variable = "DaysSinceEntry",
                            time_breakpoints = NULL,
                            time_spline_df = 3,
-                           
-                           # Constraint options - transition-specific is default
-                           constraint = "transition_specific", # "constant_across_transitions"
+                           constraint = "transition_specific",
                            
                            # Processing options
                            mc.cores = min(8, parallel::detectCores() - 1)) {
@@ -81,129 +78,235 @@ fit_msm_models <- function(patient_data,
   if (!requireNamespace("splines", quietly = TRUE)) {
     stop("splines package is required for spline functionality")  
   }
+  if (!requireNamespace("dplyr", quietly = TRUE)) {
+    stop("dplyr package is required")
+  }
   
-  # Validate that model structures in crude_rates exist in patient_data
+  # Validate model_specs
+  if (!is.data.frame(model_specs)) {
+    stop("model_specs must be a data frame or tibble")
+  }
+  
+  required_cols <- c("model_name", "model_structure")
+  missing_cols <- setdiff(required_cols, names(model_specs))
+  if (length(missing_cols) > 0) {
+    stop(paste("model_specs missing required columns:", paste(missing_cols, collapse = ", ")))
+  }
+  
+  # Check for unique model_name
+  if (any(duplicated(model_specs$model_name))) {
+    stop("model_name must be unique in model_specs")
+  }
+  
+  # Validate that all model_structure values exist in crude_rates and patient_data
   available_models <- unique(patient_data$model)
-  requested_models <- names(crude_rates)
+  requested_models <- unique(model_specs$model_structure)
+  crude_models <- names(crude_rates)
   
   missing_in_data <- setdiff(requested_models, available_models)
-  missing_crude_rates <- setdiff(available_models, requested_models)
+  missing_in_crude <- setdiff(requested_models, crude_models)
   
   if (length(missing_in_data) > 0) {
-    warning(paste("Crude rates provided for models not in patient_data:", 
-                  paste(missing_in_data, collapse = ", "), "- skipping these"))
+    stop(paste("model_structure values not found in patient_data$model:", 
+               paste(missing_in_data, collapse = ", ")))
   }
   
-  if (length(missing_crude_rates) > 0) {
-    warning(paste("Models in patient_data missing crude rates:", 
-                  paste(missing_crude_rates, collapse = ", "), "- skipping these"))
+  if (length(missing_in_crude) > 0) {
+    stop(paste("model_structure values not found in crude_rates:", 
+               paste(missing_in_crude, collapse = ", ")))
   }
   
-  # Use only models that have BOTH data and crude rates
-  model_names <- intersect(available_models, requested_models)
-  
-  if (length(model_names) == 0) {
-    stop("No valid models found - check that model names match between patient_data$model and names(crude_rates)")
-  }
-  
-  # Preprocess data for time-varying models
-  processed_data_list <- preprocess_time_varying_data(patient_data, time_varying, time_variable, time_breakpoints)
-  
-  # Build unified covariate and spline specifications
-  spec_result <- build_model_specifications(
-    covariates, spline_vars, spline_df, spline_type,
-    time_varying, time_variable, time_spline_df,
-    processed_data_list
+  # Add defaults for missing columns
+  default_cols <- list(
+    covariates = covariates,
+    spline_vars = spline_vars,
+    spline_df = spline_df,
+    spline_type = spline_type,
+    time_varying = time_varying,
+    time_variable = time_variable,
+    time_breakpoints = time_breakpoints,
+    time_spline_df = time_spline_df,
+    constraint = constraint
   )
-
-  model_specs <- spec_result$specs
-  processed_data_list <- spec_result$processed_data_list
   
-  # Define function to fit models for a single model structure
-  fit_single_model_structure <- function(modelname) {
+  for (col_name in names(default_cols)) {
+    if (!col_name %in% names(model_specs)) {
+      model_specs[[col_name]] <- default_cols[[col_name]]
+    }
+  }
+  
+  cat("Fitting", nrow(model_specs), "model specifications\n")
+  
+  # Define function to fit a single row from model_specs
+  fit_single_spec <- function(spec_row_idx) {
     # Ensure required packages in worker
     if (!require("msm", quietly = TRUE)) return(list(error = "msm package not available"))
     if (!require("splines", quietly = TRUE)) return(list(error = "splines package not available"))
     
-    model_data <- processed_data_list[[modelname]]
-    if (is.null(model_data)) {
-      warning(paste("No processed data for model", modelname))
-      return(NULL)
+    spec_row <- model_specs[spec_row_idx, ]
+    model_name <- spec_row$model_name
+    model_structure <- spec_row$model_structure
+    
+    start_time <- Sys.time()
+    
+    # Extract spec parameters (handling list columns)
+    spec_covariates <- if (is.list(spec_row$covariates)) spec_row$covariates[[1]] else spec_row$covariates
+    spec_spline_vars <- if (is.list(spec_row$spline_vars)) spec_row$spline_vars[[1]] else spec_row$spline_vars
+    spec_spline_df <- spec_row$spline_df
+    spec_spline_type <- spec_row$spline_type
+    spec_time_varying <- spec_row$time_varying
+    spec_time_variable <- spec_row$time_variable
+    spec_time_breakpoints <- if (is.list(spec_row$time_breakpoints)) spec_row$time_breakpoints[[1]] else spec_row$time_breakpoints
+    spec_time_spline_df <- spec_row$time_spline_df
+    spec_constraint <- spec_row$constraint
+    
+    # Handle NA values (convert to NULL for our purposes)
+    if (length(spec_time_varying) == 1 && is.na(spec_time_varying)) spec_time_varying <- NULL
+    
+    # Get model data
+    model_data <- patient_data[patient_data$model == model_structure, ]
+    
+    if (nrow(model_data) == 0) {
+      return(list(
+        model_name = model_name,
+        result = NULL,
+        error = paste("No data found for model_structure:", model_structure),
+        runtime = 0
+      ))
     }
     
-    crude_result <- crude_rates[[modelname]]
+    # Get crude rates
+    crude_result <- crude_rates[[model_structure]]
     if (is.null(crude_result)) {
-      warning(paste("Crude rates missing for", modelname))
-      return(NULL)
+      return(list(
+        model_name = model_name,
+        result = NULL,
+        error = paste("Crude rates missing for model_structure:", model_structure),
+        runtime = 0
+      ))
     }
     
+    # Preprocess data for time-varying models
+    processed_data <- preprocess_time_varying_data(
+      model_data, 
+      spec_time_varying, 
+      spec_time_variable, 
+      spec_time_breakpoints
+    )[[model_structure]]
+    
+    # Build model specifications
+    spec_result <- build_model_specifications(
+      spec_covariates, spec_spline_vars, spec_spline_df, spec_spline_type,
+      spec_time_varying, spec_time_variable, spec_time_spline_df,
+      setNames(list(processed_data), model_structure)
+    )
+    
+    model_spec <- spec_result$specs[["main"]]
+    processed_data <- spec_result$processed_data_list[[model_structure]]
+    
+    # Create formula
+    formula_name <- create_formula_name(model_spec$final_covariates)
+    covariate_formula <- if (length(model_spec$final_covariates) > 0) {
+      as.formula(formula_name)
+    } else {
+      NULL
+    }
+    
+    # Handle constraints
     qmat <- crude_result$qmat
     n_transitions <- sum(qmat != 0 & row(qmat) != col(qmat))
     
-    model_results <- list()
+    constraint_for_msm <- create_constraint_specification(
+      model_spec$final_covariates, spec_constraint, n_transitions, processed_data
+    )
     
-    # Loop through each model specification
-    for (spec_name in names(model_specs)) {
-      spec <- model_specs[[spec_name]]
-      
-      # Create formula
-      formula_name <- create_formula_name(spec$final_covariates)
-      covariate_formula <- if (length(spec$final_covariates) > 0) {
-        as.formula(formula_name)
-      } else {
-        NULL
-      }
-      
-      # Handle constraints
-      constraint_for_msm <- create_constraint_specification(
-        spec$final_covariates, constraint, n_transitions, model_data
+    # Try multiple optimization methods
+    fitted_model <- try_multiple_optimizations(
+      processed_data, crude_result, covariate_formula, constraint_for_msm
+    )
+    
+    # Create comprehensive metadata
+    metadata <- create_model_metadata(
+      model_spec, spec_covariates, spec_spline_vars, spec_spline_df, spec_spline_type,
+      spec_time_varying, spec_time_variable, spec_time_breakpoints, spec_time_spline_df,
+      spec_constraint, fitted_model
+    )
+    
+    # Add model_structure to metadata
+    metadata$model_structure <- model_structure
+    
+    # Store result
+    result <- if (!is.null(fitted_model$model)) {
+      list(
+        fitted_model = fitted_model$model,
+        status = "converged",
+        optimization_method = fitted_model$method,
+        metadata = metadata,
+        crude_rates = crude_result,
+        error_message = NULL
       )
-      
-      # Try multiple optimization methods
-      fitted_model <- try_multiple_optimizations(
-        model_data, crude_result, covariate_formula, constraint_for_msm
+    } else {
+      list(
+        fitted_model = NULL,
+        status = "failed",
+        optimization_method = fitted_model$method,
+        metadata = metadata,
+        crude_rates = crude_result,
+        error_message = fitted_model$error
       )
-      
-      # Create comprehensive metadata
-      metadata <- create_model_metadata(
-        spec, covariates, spline_vars, spline_df, spline_type,
-        time_varying, time_variable, time_breakpoints, time_spline_df,
-        constraint, fitted_model
-      )
-      
-      # Store result
-      if (!is.null(fitted_model$model)) {
-        model_results[[formula_name]] <- list(
-          fitted_model = fitted_model$model,
-          status = "converged",
-          optimization_method = fitted_model$method,
-          metadata = metadata,
-          error_message = NULL
-        )
-      } else {
-        model_results[[formula_name]] <- list(
-          fitted_model = NULL,
-          status = "failed",
-          optimization_method = fitted_model$method,
-          metadata = metadata,
-          error_message = fitted_model$error
-        )
-      }
     }
     
-    return(model_results)
+    end_time <- Sys.time()
+    runtime <- as.numeric(difftime(end_time, start_time, units = "secs"))
+    
+    return(list(
+      model_name = model_name,
+      formula_name = formula_name,
+      result = result,
+      error = NULL,
+      runtime = runtime
+    ))
   }
   
-  # Parallelize across model structures
-  fitted_models_list <- parallel::mclapply(
-    model_names,
-    fit_single_model_structure,
+  # Parallelize across rows of model_specs
+  fitted_results <- parallel::mclapply(
+    seq_len(nrow(model_specs)),
+    fit_single_spec,
     mc.cores = mc.cores
   )
   
-  # Convert to named list and remove NULL entries
-  fitted_msm_models <- setNames(fitted_models_list, model_names)
-  fitted_msm_models <- fitted_msm_models[!sapply(fitted_msm_models, is.null)]
+  # Reorganize into nested structure: fitted_models[[model_name]][[formula_name]]
+  fitted_msm_models <- list()
+  runtimes <- list()
+  
+  for (result in fitted_results) {
+    if (is.null(result$error)) {
+      model_name <- result$model_name
+      formula_name <- result$formula_name
+      
+      if (!model_name %in% names(fitted_msm_models)) {
+        fitted_msm_models[[model_name]] <- list()
+      }
+      
+      fitted_msm_models[[model_name]][[formula_name]] <- result$result
+      runtimes[[model_name]] <- result$runtime
+    } else {
+      warning(paste("Error fitting", result$model_name, ":", result$error))
+    }
+  }
+  
+  # Print runtimes
+  cat("\n=== Model Fitting Runtimes ===\n")
+  for (model_name in names(runtimes)) {
+    runtime_mins <- round(runtimes[[model_name]] / 60, 2)
+    runtime_secs <- round(runtimes[[model_name]], 1)
+    
+    if (runtime_mins >= 1) {
+      cat(sprintf("%s: %.2f minutes\n", model_name, runtime_mins))
+    } else {
+      cat(sprintf("%s: %.1f seconds\n", model_name, runtime_secs))
+    }
+  }
   
   return(fitted_msm_models)
 }
@@ -1160,7 +1263,67 @@ create_model_metadata <- function(spec, covariates, spline_vars, spline_df, spli
   return(metadata)
 }
 
-### Helper functions for univariate models -----------------------------------------
+combine_model_lists <- function(list1, 
+                                list2, 
+                                model_names, 
+                                source = NULL) {
+  
+  # Validate inputs
+  if (!is.list(list1) || !is.list(list2)) {
+    stop("list1 and list2 must be lists")
+  }
+  
+  if (!is.character(model_names)) {
+    stop("model_names must be a character vector")
+  }
+  
+  # If source is not provided, create it based on where each model is found
+  if (is.null(source)) {
+    source <- sapply(model_names, function(name) {
+      in_list1 <- name %in% names(list1)
+      in_list2 <- name %in% names(list2)
+      
+      if (in_list1 && in_list2) {
+        warning(paste("Model", name, "found in both lists. Using list1. ",
+                      "Specify 'source' parameter to control selection."))
+        return(1)
+      } else if (in_list1) {
+        return(1)
+      } else if (in_list2) {
+        return(2)
+      } else {
+        stop(paste("Model", name, "not found in either list"))
+      }
+    })
+  }
+  
+  # Validate source vector
+  if (length(source) != length(model_names)) {
+    stop("source must be the same length as model_names")
+  }
+  
+  if (!all(source %in% c(1, 2))) {
+    stop("source must contain only 1 (for list1) or 2 (for list2)")
+  }
+  
+  # Build combined list
+  combined_list <- list()
+  
+  for (i in seq_along(model_names)) {
+    model_name <- model_names[i]
+    source_list <- if (source[i] == 1) list1 else list2
+    
+    if (!model_name %in% names(source_list)) {
+      stop(paste("Model", model_name, "not found in list", source[i]))
+    }
+    
+    combined_list[[model_name]] <- source_list[[model_name]]
+  }
+  
+  return(combined_list)
+}
+
+## Helper functions for univariate models -----------------------------------------
 
 # Helper function to build univariate specifications
 build_univariate_specs <- function(covariates, spline_vars) {

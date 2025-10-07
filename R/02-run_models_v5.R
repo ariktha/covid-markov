@@ -69,17 +69,26 @@ cat("N observations:", nrow(pt_stg), "\n")
 if(do_no_cov){
   
   if(fit_no_cov_models){
+    
     cat("\n=== Fitting base models (No covariates) ===\n")
     start_time <- Sys.time()
+    
+    base_model_specs <- tibble(
+      model_name = names(crude_rates),
+      model_structure = names(crude_rates)
+    )
+    
     base_models <- fit_msm_models(
       patient_data = pt_stg, 
       crude_rates = crude_rates,
+      model_specs = base_model_specs,
       covariates = NULL,
       spline_vars = NULL,
       time_varying = NULL,
       constraint = "transition_specific",
       mc.cores = n.cores
     )
+    
     end_time <- Sys.time()
     cat("Base models fitting time:", round(difftime(end_time, start_time, units = "mins"), 2), "minutes\n")
     saveRDS(base_models, here("data", "temp", "base_models.rds"))
@@ -117,63 +126,37 @@ if(do_no_cov){
   gc()
 }
 
+base_pred <- cv_msm_models(fitted_models = base_models, 
+                           patient_data = pt_stg, 
+                           k_folds = 5,
+                           parallel = TRUE,
+                           n_cores = n.cores)
+
 # Check Markov assumption --------------------------------------------------
 
 if(do_markov){
   
   if(fit_markov_models){
-    # 1a. Time in severe as covariate: linear term
-    markov_time_severe <- fit_msm_models(
+    
+    markov_model_specs <- tibble(
+      model_name = c("base_time_severe", "base_time_severe_spline", 
+                     "base_time_severe_ts"),
+      model_structure = c("base_model", "base_model", "base_model"),
+      covariates = list(c("hx_sev_time"), NULL, c("hx_sev_time")),
+      spline_vars = list(NULL, c("hx_sev_time"), NULL),
+      spline_df = c(NA, 3, NA),
+      spline_type = c(NA, "ns", NA),
+      constraint = c("transition_specific", "transition_specific", 
+                     "constant_across_transitions")
+    )
+    
+    markov_comparison_models <- fit_msm_models(
       patient_data = pt_stg,
-      crude_rates =  list(base_model = crude_rates[["base_model"]]),
-      covariates = list("time_in_severe" = "hx_sev_time"),
+      crude_rates = crude_rates,
+      model_specs = markov_model_specs,
       mc.cores = n.cores
     )
-    
-    # 1b. Time in severe as covariate: spline term
-    markov_time_severe_spline <- fit_msm_models(
-      patient_data = pt_stg,
-      crude_rates = list(base_model = crude_rates[["base_model"]]),
-      spline_vars = "hx_sev_time",
-      spline_df = 3,
-      spline_type = "ns",
-      constraint = "transition_specific",  # default, but being explicit
-      mc.cores = n.cores
-    )
-    
-    # 1c. Time in severe as covariate: all covariate effects constrained to be the same
-    markov_time_severe_ts <- fit_msm_models(
-      patient_data = pt_stg,
-      crude_rates = list(base_model = crude_rates[["base_model"]]),
-      covariates = "hx_sev_time",
-      constraint = "constant_across_transitions",  
-      mc.cores = n.cores
-    )
-    
-    # 2. History of severe state model (already in base models as "hx_sev")
-    # Extract for comparison
-    hx_sev_model <- base_models[["hx_sev"]]
-    
-    # Comparison: base vs time-in-severe covariate vs history state
-    # Create properly nested structure for Markov comparison
-    markov_comparison_models <- list(
-      base_no_covariates = list(
-        "~ 1" = base_models[["base_model"]][["~ 1"]]
-      ),
-      base_with_time_severe = list(
-        "~ hx_sev_time" = markov_time_severe[["base_model"]][["~ hx_sev_time"]]
-      ),
-      base_with_time_severe_spline = list(
-        "~ hx_sev_time_ns1 + hx_sev_time_ns2 + hx_sev_time_ns3" = markov_time_severe_spline[["base_model"]][["~ hx_sev_time_ns1 + hx_sev_time_ns2 + hx_sev_time_ns3"]]
-      ),
-      base_with_time_severe_ts = list(
-        "~ hx_sev_time" = markov_time_severe_ts[["base_model"]][["~ hx_sev_time"]]
-      ),
-      history_severe_structure = list(
-        "~ 1" = base_models[["hx_sev"]][["~ 1"]]
-      )
-    )
-    
+
     saveRDS(markov_comparison_models, here("data", "temp", "markov_comparison_models.rds"))
   } else {
     markov_comparison_models <- readRDS(here("data", "temp", "markov_comparison_models.rds"))
@@ -217,6 +200,7 @@ if(do_markov){
   
   gc()
 }
+
 
 # Covariate effects -------------------------------------------------------
 

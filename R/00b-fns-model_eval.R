@@ -20,11 +20,19 @@ tidy_msm_models <- function(fitted_msm_models) {
   
   validate_model_structure(fitted_msm_models)
   
-  # Loop through model structures (outer level)
-  for (model_structure in names(fitted_msm_models)) {
+  # Loop through model names (outer level)
+  for (model_name in names(fitted_msm_models)) {
     # Loop through covariate formulas (inner level)
-    for (formula_name in names(fitted_msm_models[[model_structure]])) {
-      model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
+      
+      metadata <- if (is.list(model_entry) && !is.null(model_entry$metadata)) {
+        model_entry$metadata
+      } else {
+        list()
+      }
+      
+      model_structure <- metadata$model_structure
       
       # Check if this is a failed model
       if (is.null(model_entry) || 
@@ -37,15 +45,10 @@ tidy_msm_models <- function(fitted_msm_models) {
           NA_character_
         }
         
-        metadata <- if (is.list(model_entry) && !is.null(model_entry$metadata)) {
-          model_entry$metadata
-        } else {
-          list()
-        }
-        
         # Include failed models in output with NAs
         failed_tidy <- tibble::tibble(
-          model = model_structure,
+          model_name = model_name,
+          model_structure = model_structure,
           formula = formula_name,
           covariate = extract_covariate_label_from_metadata(metadata, formula_name),
           base_variables = list(extract_base_variables_from_metadata(metadata)),
@@ -112,7 +115,8 @@ tidy_msm_models <- function(fitted_msm_models) {
         converged <- is.null(fitted_model$opt$convergence) || fitted_model$opt$convergence == 0
         
         tidy_result <- tibble::tibble(
-          model = model_structure,
+          model_name = model_name,
+          model_structure = model_structure,
           formula = formula_name,
           covariate = extract_covariate_label_from_metadata(metadata, formula_name),
           base_variables = list(extract_base_variables_from_metadata(metadata)),
@@ -141,7 +145,8 @@ tidy_msm_models <- function(fitted_msm_models) {
         
         # Return failed entry with error info
         tibble::tibble(
-          model = model_structure,
+          model_name = model_name,
+          model_structure = model_structure,
           formula = formula_name,
           covariate = extract_covariate_label_from_metadata(metadata, formula_name),
           base_variables = list(extract_base_variables_from_metadata(metadata)),
@@ -189,20 +194,20 @@ tidy_msm_qmatrix <- function(fitted_msm_models,
   tidied_qmats <- data.frame()
   
   # Loop through model structures (outer level)
-  for (model_structure in names(fitted_msm_models)) {
+  for (model_name in names(fitted_msm_models)) {
     # Loop through covariate formulas (inner level)
-    for (formula_name in names(fitted_msm_models[[model_structure]])) {
-      model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
       
       # Check if this is a failed model
       if (is.null(model_entry) || 
           (is.list(model_entry) && !is.null(model_entry$status) && model_entry$status == "failed")) {
-        warning(paste("Skipping tidying for", model_structure, formula_name, "- model failed to fit"))
+        warning(paste("Skipping tidying for", model_name, formula_name, "- model failed to fit"))
         next
       }
       
       # Extract the fitted model object
-      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in tidy_msm_qmatrix")
+      fitted_model <- extract_fitted_model(fitted_msm_models, model_name, formula_name, "in tidy_msm_qmatrix")
       if (is.null(fitted_model)) next
       
       # Extract metadata for better covariate info
@@ -211,6 +216,8 @@ tidy_msm_qmatrix <- function(fitted_msm_models,
       } else {
         list()
       }
+      
+      model_structure <- metadata$model_structure
       
       model_tidy <- tryCatch({
         qmat_result <- qmatrix.msm(fitted_model, ci = ci_type, cores = mc.cores)
@@ -221,7 +228,8 @@ tidy_msm_qmatrix <- function(fitted_msm_models,
         # Use tidy() directly and add metadata
         tidy(qmat_result) %>%
           mutate(
-            model = model_structure,
+            model_name = model_name,
+            model_structure = model_structure,
             formula = formula_name,
             covariate = covariate_vars,
             constraint_type = extract_constraint_type_from_metadata(metadata),
@@ -231,7 +239,7 @@ tidy_msm_qmatrix <- function(fitted_msm_models,
             cov_value = NA
           )
       }, error = function(e) {
-        warning(paste("Error tidying qmatrix for", model_structure, formula_name, ":", e$message))
+        warning(paste("Error tidying qmatrix for", model_name, formula_name, ":", e$message))
         return(NULL)
       })
       
@@ -257,19 +265,19 @@ tidy_msm_pmats <- function(fitted_msm_models,
   tidied_pmats <- data.frame()
   
   # Loop through model structures (outer level)
-  for (model_structure in names(fitted_msm_models)) {
+  for (model_name in names(fitted_msm_models)) {
     # Loop through covariate formulas (inner level)
-    for (formula_name in names(fitted_msm_models[[model_structure]])) {
-      model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
       
       # Check if this is a failed model
       if (is.null(model_entry) || 
           (is.list(model_entry) && !is.null(model_entry$status) && model_entry$status == "failed")) {
-        warning(paste("Skipping tidying for", model_structure, formula_name, "- model failed to fit"))
+        warning(paste("Skipping tidying for", model_name, formula_name, "- model failed to fit"))
         next
       }
       
-      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in tidy_msm_pmats")
+      fitted_model <- extract_fitted_model(fitted_msm_models, model_name, formula_name, "in tidy_msm_pmats")
       if (is.null(fitted_model)) next
       
       # Extract metadata for better covariate info
@@ -279,6 +287,7 @@ tidy_msm_pmats <- function(fitted_msm_models,
         list()
       }
       
+      model_structure <- metadata$model_structure
       covariate_vars <- extract_covariate_label_from_metadata(metadata, formula_name)
       
       # Handle multiple time points
@@ -291,7 +300,8 @@ tidy_msm_pmats <- function(fitted_msm_models,
             # Use tidy() directly and add metadata
             tidy(pmat_result) %>%
               mutate(
-                model = model_structure,
+                model_name = model_name,
+                model_structure = model_structure,
                 formula = formula_name,
                 covariate = covariate_vars,
                 constraint_type = extract_constraint_type_from_metadata(metadata),
@@ -302,7 +312,7 @@ tidy_msm_pmats <- function(fitted_msm_models,
                 t_value = t_val
               )
           }, error = function(e) {
-            warning(paste("Error tidying pmat for", model_structure, formula_name, "at t =", t_val, ":", e$message))
+            warning(paste("Error tidying pmat for", model_name, formula_name, "at t =", t_val, ":", e$message))
             return(NULL)
           })
           
@@ -319,7 +329,8 @@ tidy_msm_pmats <- function(fitted_msm_models,
               # Use tidy() directly and add metadata
               tidy(pmat_result) %>%
                 mutate(
-                  model = model_structure,
+                  model_name = model_name,
+                  model_structure = model_structure,
                   formula = formula_name,
                   covariate = covariate_vars,
                   constraint_type = extract_constraint_type_from_metadata(metadata),
@@ -330,7 +341,7 @@ tidy_msm_pmats <- function(fitted_msm_models,
                   t_value = t_val
                 )
             }, error = function(e) {
-              warning(paste("Error tidying pmat for", model_structure, formula_name, ":", e$message))
+              warning(paste("Error tidying pmat for", model_name, formula_name, ":", e$message))
               return(NULL)
             })
             
@@ -355,19 +366,19 @@ tidy_msm_sojourns <- function(fitted_msm_models,
   tidied_sojourns <- data.frame()
   
   # Loop through model structures (outer level)
-  for (model_structure in names(fitted_msm_models)) {
+  for (model_name in names(fitted_msm_models)) {
     # Loop through covariate formulas (inner level)
-    for (formula_name in names(fitted_msm_models[[model_structure]])) {
-      model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
       
       # Check if this is a failed model
       if (is.null(model_entry) || 
           (is.list(model_entry) && !is.null(model_entry$status) && model_entry$status == "failed")) {
-        warning(paste("Skipping tidying for", model_structure, formula_name, "- model failed to fit"))
+        warning(paste("Skipping tidying for", model_name, formula_name, "- model failed to fit"))
         next
       }
       
-      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in tidy_msm_sojourns")
+      fitted_model <- extract_fitted_model(fitted_msm_models, model_name, formula_name, "in tidy_msm_sojourns")
       if (is.null(fitted_model)) next
       
       # Extract metadata for better covariate info
@@ -377,6 +388,7 @@ tidy_msm_sojourns <- function(fitted_msm_models,
         list()
       }
       
+      model_structure <- metadata$model_structure
       covariate_vars <- extract_covariate_label_from_metadata(metadata, formula_name)
       
       # Handle multiple covariate combinations
@@ -390,7 +402,8 @@ tidy_msm_sojourns <- function(fitted_msm_models,
           sojourn_result %>%
             mutate(
               state = states,
-              model = model_structure,
+              model_name = model_name,
+              model_structure = model_structure,
               formula = formula_name,
               covariate = covariate_vars,
               constraint_type = extract_constraint_type_from_metadata(metadata),
@@ -400,7 +413,7 @@ tidy_msm_sojourns <- function(fitted_msm_models,
               cov_value = NA
             )
         }, error = function(e) {
-          warning(paste("Error tidying sojourns for", model_structure, formula_name, ":", e$message))
+          warning(paste("Error tidying sojourns for", model_name, formula_name, ":", e$message))
           return(NULL)
         })
         
@@ -416,7 +429,8 @@ tidy_msm_sojourns <- function(fitted_msm_models,
             # Use tidy() directly and add metadata
             tidy(sojourn_result) %>%
               mutate(
-                model = model_structure,
+                model_name = model_name,
+                model_structure = model_structure,
                 formula = formula_name,
                 covariate = covariate_vars,
                 constraint_type = extract_constraint_type_from_metadata(metadata),
@@ -426,7 +440,7 @@ tidy_msm_sojourns <- function(fitted_msm_models,
                 cov_value = cov_combo[[1]]
               )
           }, error = function(e) {
-            warning(paste("Error tidying sojourns for", model_structure, formula_name, ":", e$message))
+            warning(paste("Error tidying sojourns for", model_name, formula_name, ":", e$message))
             return(NULL)
           })
           
@@ -449,22 +463,22 @@ tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
   tidied_hrs <- data.frame()
   
   # Loop through model structures (outer level)
-  for (model_structure in names(fitted_msm_models)) {
+  for (model_name in names(fitted_msm_models)) {
     # Loop through covariate formulas (inner level)
-    for (formula_name in names(fitted_msm_models[[model_structure]])) {
-      model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
       
       # Check if this is a failed model
       if (is.null(model_entry) || 
           (is.list(model_entry) && !is.null(model_entry$status) && model_entry$status == "failed")) {
-        warning(paste("Skipping tidying for", model_structure, formula_name, "- model failed to fit"))
+        warning(paste("Skipping tidying for", model_name, formula_name, "- model failed to fit"))
         next
       }
       
-      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in tidy_msm_hazards")
+      fitted_model <- extract_fitted_model(fitted_msm_models, model_name, formula_name, "in tidy_msm_hazards")
       
       if (is.null(fitted_model)) {
-        warning(paste("Fitted model is NULL for", model_structure, formula_name))
+        warning(paste("Fitted model is NULL for", model_name, formula_name))
         next
       }
       
@@ -474,6 +488,8 @@ tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
       } else {
         list()
       }
+      
+      model_structure <- metadata$model_structure
       
       # Check if model has covariates using metadata first, then fallback
       has_covariates <- FALSE
@@ -487,7 +503,7 @@ tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
       }
       
       if (!has_covariates) {
-        warning(paste("Skipping hazards for", model_structure, formula_name, "- model has no covariates"))
+        warning(paste("Skipping hazards for", model_name, formula_name, "- model has no covariates"))
         next
       }
       
@@ -526,7 +542,8 @@ tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
         # Add comprehensive metadata
         hr_tidy <- hr_tidy_list %>%
           mutate(
-            model = model_structure,
+            model_name = model_name,
+            model_structure = model_structure,
             formula = formula_name,
             covariate = covariate_vars,
             constraint_type = extract_constraint_type_from_metadata(metadata),
@@ -538,7 +555,7 @@ tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
             base_variables_list = list(base_variables)
           )
       }, error = function(e) {
-        warning(paste("Error tidying hazards for", model_structure, formula_name, ":", e$message))
+        warning(paste("Error tidying hazards for", model_name, formula_name, ":", e$message))
         return(NULL)
       })
       
@@ -576,10 +593,10 @@ calculate_spline_hazard_ratios <- function(fitted_msm_models,
   all_results <- list()
   
   # Loop through models
-  for (model_structure in names(fitted_msm_models)) {
-    for (formula_name in names(fitted_msm_models[[model_structure]])) {
+  for (model_name in names(fitted_msm_models)) {
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
       
-      model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
       
       # Skip failed models
       if (is.null(model_entry) || 
@@ -592,6 +609,8 @@ calculate_spline_hazard_ratios <- function(fitted_msm_models,
       metadata <- model_entry$metadata
       
       if (is.null(fitted_model) || is.null(metadata)) next
+      
+      model_structure <- metadata$model_structure
       
       # Check if model has splines
       if (!extract_has_splines_from_metadata(metadata)) {
@@ -711,7 +730,8 @@ calculate_spline_hazard_ratios <- function(fitted_msm_models,
               hr_upper <- eval_hr[trans, "U"] / ref_hr[trans, "L"]
               
               grid_results[[length(grid_results) + 1]] <- data.frame(
-                model = model_structure,
+                model_name = model_name,
+                model_structure = model_structure,
                 formula = formula_name,
                 spline_variable = spline_var,
                 variable_value = eval_value,
@@ -756,7 +776,7 @@ calculate_spline_hazard_ratios <- function(fitted_msm_models,
   cat("=== COMPLETED ===\n")
   cat("Calculated HRs for", length(unique(final_results$spline_variable)), 
       "spline variables\n")
-  cat("Across", length(unique(final_results$model)), "model structures\n")
+  cat("Across", length(unique(final_results$model_structure)), "model structures\n")
   cat("Total rows:", nrow(final_results), "\n")
   
   return(final_results)
@@ -795,15 +815,16 @@ tidy_msm_prevalences <- function(fitted_msm_models,
   model_combinations <- list()
   combination_count <- 0
   
-  for (model_structure in names(fitted_msm_models)) {
-    for (formula_name in names(fitted_msm_models[[model_structure]])) {
-      model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
+  for (model_name in names(fitted_msm_models)) {
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
       if (!is.null(model_entry) && 
           is.list(model_entry) && 
           model_entry$status == "converged") {
         combination_count <- combination_count + 1
         # Store only the essential info, not the full model objects
         model_combinations[[combination_count]] <- list(
+          model_name = model_name,
           model_structure = model_structure, 
           formula_name = formula_name,
           index = combination_count
@@ -821,13 +842,14 @@ tidy_msm_prevalences <- function(fitted_msm_models,
     if (!require("msm", quietly = TRUE)) return(NULL)
     if (!require("dplyr", quietly = TRUE)) return(NULL)
     
-    model_structure <- combo_info$model_structure
+    model_name <- combo_info$model_name
     formula_name <- combo_info$formula_name
     
     # Extract model object and metadata inside worker to minimize data transfer
-    model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
+    model_entry <- fitted_msm_models[[model_name]][[formula_name]]
     fitted_model <- model_entry$fitted_model
     metadata <- model_entry$metadata
+    model_structure <- metadata$model_structure
     
     if (is.null(fitted_model)) return(NULL)
     
@@ -856,7 +878,8 @@ tidy_msm_prevalences <- function(fitted_msm_models,
         
         prevalence_to_tib(prev_result, fitted_model, has_ci = ci) %>%
           mutate(
-            model = model_structure,
+            model_name = model_name,
+            model_structure = model_structure,
             formula = formula_name,
             covariate = covariate_vars,
             constraint_type = extract_constraint_type_from_metadata(metadata),
@@ -891,7 +914,8 @@ tidy_msm_prevalences <- function(fitted_msm_models,
           
           cov_results[[i]] <- prevalence_to_tib(prev_result, fitted_model, has_ci = ci) %>%
             mutate(
-              model = model_structure,
+              model_name = model_name,
+              model_structure = model_structure,
               formula = formula_name,
               covariate = covariate_vars,
               constraint_type = extract_constraint_type_from_metadata(metadata),
@@ -907,7 +931,7 @@ tidy_msm_prevalences <- function(fitted_msm_models,
       }
     }, error = function(e) {
       # Return minimal error info to reduce memory usage
-      return(list(error = e$message, model = model_structure, formula = formula_name))
+      return(list(error = e$message, model = model_name, formula = formula_name))
     })
   }
   
@@ -947,7 +971,7 @@ tidy_msm_prevalences <- function(fitted_msm_models,
     result <- prevalence_list[[i]]
     if (is.list(result) && "error" %in% names(result)) {
       error_count <- error_count + 1
-      cat("Error in combination", i, ":", result$model, result$formula, ":", result$error, "\n")
+      cat("Error in combination", i, ":", result$model_name, result$formula, ":", result$error, "\n")
     } else if (is.data.frame(result)) {
       valid_count <- valid_count + 1
       valid_results[[valid_count]] <- result
@@ -1144,535 +1168,6 @@ prevalence_to_tib <- function(prevalence_result, fitted_model, has_ci = TRUE) {
 }
 
 
-### Predictive performance --------------------------------------------
-
-#' Cross-validation with covariate-specific calibration assessment
-#' @param fitted_models Nested list of fitted models: fitted_models[[model_structure]][[formula]]
-#' @param patient_data Patient data
-#' @param crude_rates List of crude rates
-#' @param k_folds Number of CV folds
-#' @param prediction_times Vector of prediction horizons
-#' @param stratify_by Variable to stratify folds
-#' @param calibration_covariates List of covariate values to evaluate calibration at
-#' @param calibration_subgroups List of variables to stratify calibration by
-#' @param parallel Logical, whether to use parallel processing (auto-detect if NULL)
-#' @param n_cores Number of cores for parallel processing
-#' @return Data frame with CV results including covariate-specific calibration
-calculate_predictive_performance <- function(patient_data, 
-                                             fitted_models, crude_rates,
-                                             k_folds = 5, 
-                                             prediction_times = c(14, 30),
-                                             stratify_by = "final_state",
-                                             calibration_covariates = NULL,
-                                             calibration_subgroups = NULL,
-                                             parallel = NULL, 
-                                             n_cores = min(6, parallel::detectCores() - 1)) {
-  
-  validate_model_structure(fitted_models)
-  
-  # Auto-detect parallel processing based on total number of model/formula combinations
-  total_combinations <- sum(sapply(fitted_models, length))
-  if (is.null(parallel)) {
-    parallel <- total_combinations > 2 && parallel::detectCores() > 2
-  }
-  
-  # Setup parallel backend if requested
-  if (parallel) {
-    if (!requireNamespace("furrr", quietly = TRUE) || !requireNamespace("future", quietly = TRUE)) {
-      warning("furrr/future packages not available. Falling back to sequential processing.")
-      parallel <- FALSE
-    } else {
-      library(furrr)
-      library(future)
-      plan(multisession, workers = n_cores)
-      on.exit(plan(sequential), add = TRUE)
-      cat("Using parallel processing with", n_cores, "cores\n")
-    }
-  }
-  
-  if (!parallel) cat("Using sequential processing\n")
-  
-  # Create stratified fold assignments
-  unique_patients <- patient_data %>%
-    group_by(deid_enc_id) %>%
-    summarise(
-      final_state = last(state),
-      model = first(model),
-      .groups = "drop"
-    )
-  
-  set.seed(123)
-  fold_assignments <- unique_patients %>%
-    group_by(!!sym(stratify_by)) %>%
-    mutate(fold = sample(rep(1:k_folds, length.out = n()))) %>%
-    ungroup() %>%
-    select(deid_enc_id, fold)
-  
-  cv_results <- list()
-  
-  # Loop through model structures
-  for (model_structure in names(fitted_models)) {
-    # Loop through formulas within each model structure
-    for (formula_name in names(fitted_models[[model_structure]])) {
-      model_entry <- fitted_models[[model_structure]][[formula_name]]
-      
-      # Check if this is a failed model
-      if (is.null(model_entry) || 
-          (is.list(model_entry) && !is.null(model_entry$status) && model_entry$status == "failed")) {
-        warning(paste("Skipping CV for", model_structure, formula_name, "- model failed to fit"))
-        next
-      }
-      
-      # Extract the fitted model object and metadata
-      fitted_model <- if (is.list(model_entry) && !is.null(model_entry$fitted_model)) {
-        model_entry$fitted_model
-      } else {
-        model_entry  # Backwards compatibility
-      }
-      
-      metadata <- if (is.list(model_entry) && !is.null(model_entry$metadata)) {
-        model_entry$metadata
-      } else {
-        list()
-      }
-      
-      if (is.null(fitted_model)) {
-        warning(paste("Fitted model is NULL for", model_structure, formula_name))
-        next
-      }
-      
-      cat("Running CV for model:", model_structure, "formula:", formula_name, "\n")
-      
-      model_data <- patient_data %>% filter(model == model_structure)
-      model_fold_assignments <- fold_assignments %>%
-        filter(deid_enc_id %in% unique(model_data$deid_enc_id))
-      
-      # Extract covariate formula from the formula name
-      covariate_formula <- if (formula_name == "~ 1") {
-        NULL
-      } else {
-        as.formula(formula_name)
-      }
-      
-      combination_key <- paste(model_structure, formula_name, sep = "_")
-      
-      # Run CV folds with enhanced calibration
-      fold_results <- if (parallel) {
-        # First attempt with current settings
-        tryCatch({
-          future_map_dfr(1:k_folds, function(fold) {
-            cv_fold_core(fold, model_fold_assignments, model_data, crude_rates[[model_structure]], 
-                         covariate_formula, prediction_times, calibration_covariates, calibration_subgroups, model_entry)
-          }, .options = furrr_options(seed = TRUE))
-        }, error = function(e) {
-          if (grepl("future.globals.maxSize", e$message)) {
-            cat("  Globals size exceeded for", model_structure, formula_name, "- increasing to 750 MiB and retrying...\n")
-            
-            # Store current setting
-            current_maxsize <- getOption("future.globals.maxSize")
-            
-            # Increase to 750 MiB temporarily
-            options(future.globals.maxSize = 750 * 1024^2)
-            
-            tryCatch({
-              result <- future_map_dfr(1:k_folds, function(fold) {
-                cv_fold_core(fold, model_fold_assignments, model_data, crude_rates[[model_structure]], 
-                             covariate_formula, prediction_times, calibration_covariates, calibration_subgroups, model_entry)
-              }, .options = furrr_options(seed = TRUE))
-              
-              cat("  Successfully completed", model_structure, formula_name, "with increased maxSize\n")
-              return(result)
-              
-            }, error = function(e2) {
-              cat("  Failed even with increased maxSize for", model_structure, formula_name, ":", e2$message, "\n")
-              stop("Model ", model_structure, " ", formula_name, " failed: ", e2$message)
-            }, finally = {
-              # Restore original setting
-              options(future.globals.maxSize = current_maxsize)
-            })
-          } else {
-            # Re-throw if it's a different error
-            stop("Model ", model_structure, " ", formula_name, " failed: ", e$message)
-          }
-        })
-      } else {
-        map_dfr(1:k_folds, function(fold) {
-          cv_fold_core(fold, model_fold_assignments, model_data, crude_rates[[model_structure]], 
-                       covariate_formula, prediction_times, calibration_covariates, calibration_subgroups, model_entry)
-        })
-      }
-      
-      # Extract covariate information from metadata
-      covariate_vars <- extract_covariate_label_from_metadata(metadata, formula_name)
-      
-      # Aggregate results with enhanced metadata
-      base_results <- fold_results %>%
-        filter(is.na(prediction_time) & is.na(subgroup_var)) %>%
-        summarise(
-          model = model_structure,
-          formula = formula_name,
-          covariate = covariate_vars,
-          constraint_type = extract_constraint_type_from_metadata(metadata),
-          has_splines = extract_has_splines_from_metadata(metadata),
-          has_time_varying = extract_has_time_varying_from_metadata(metadata),
-          time_varying_type = extract_time_varying_type_from_metadata(metadata),
-          n_base_variables = length(extract_base_variables_from_metadata(metadata)),
-          n_folds_converged = sum(model_converged, na.rm = TRUE),
-          total_los_mae_cv = mean(total_los_mae, na.rm = TRUE),
-          total_los_mae_se = sd(total_los_mae, na.rm = TRUE) / sqrt(n()),
-          total_los_mae_soj_cv = mean(total_los_mae_soj, na.rm = TRUE),
-          total_los_mae_soj_se = sd(total_los_mae_soj, na.rm = TRUE) / sqrt(n()),
-          total_los_mae_vis_soj_cv = mean(total_los_mae_vis_soj, na.rm = TRUE),
-          total_los_mae_vis_soj_se = sd(total_los_mae_vis_soj, na.rm = TRUE) / sqrt(n()),
-          days_severe_mae_cv = mean(days_severe_mae, na.rm = TRUE),
-          days_severe_mae_se = sd(days_severe_mae, na.rm = TRUE) / sqrt(n()),
-          days_severe_mae_soj_cv = mean(days_severe_mae_soj, na.rm = TRUE),
-          days_severe_mae_soj_se = sd(days_severe_mae_soj, na.rm = TRUE) / sqrt(n()),
-          days_severe_mae_vis_soj_cv = mean(days_severe_mae_vis_soj, na.rm = TRUE),
-          days_severe_mae_vis_soj_se = sd(days_severe_mae_vis_soj, na.rm = TRUE) / sqrt(n()),
-          death_auc_cv = mean(death_auc, na.rm = TRUE),
-          death_auc_se = sd(death_auc, na.rm = TRUE) / sqrt(n()),
-          severe_auc_cv = mean(severe_auc, na.rm = TRUE),
-          severe_auc_se = sd(severe_auc, na.rm = TRUE) / sqrt(n()),
-          calibration_slope_death_cv = mean(calibration_slope_death, na.rm = TRUE),
-          calibration_intercept_death_cv = mean(calibration_intercept_death, na.rm = TRUE),
-          brier_death_cv = mean(brier_death, na.rm = TRUE),
-          .groups = "drop"
-        )
-      
-      # Time-specific calibration results
-      time_specific_results <- fold_results %>%
-        filter(!is.na(prediction_time) & is.na(subgroup_var)) %>%
-        group_by(prediction_time) %>%
-        summarise(
-          model = model_structure,
-          formula = formula_name,
-          covariate = covariate_vars,
-          constraint_type = extract_constraint_type_from_metadata(metadata),
-          has_splines = extract_has_splines_from_metadata(metadata),
-          has_time_varying = extract_has_time_varying_from_metadata(metadata),
-          time_varying_type = extract_time_varying_type_from_metadata(metadata),
-          prediction_time = first(prediction_time),
-          calibration_slope_death_time = mean(calibration_slope_death, na.rm = TRUE),
-          calibration_intercept_death_time = mean(calibration_intercept_death, na.rm = TRUE),
-          brier_death_time = mean(brier_death, na.rm = TRUE),
-          death_auc_time = mean(death_auc, na.rm = TRUE),
-          severe_auc_time = mean(severe_auc, na.rm = TRUE),
-          .groups = "drop"
-        )
-      
-      # Subgroup-specific calibration results
-      subgroup_specific_results <- fold_results %>%
-        filter(is.na(prediction_time) & !is.na(subgroup_var)) %>%
-        group_by(subgroup_var, subgroup_value) %>%
-        summarise(
-          model = model_structure,
-          formula = formula_name,
-          covariate = covariate_vars,
-          constraint_type = extract_constraint_type_from_metadata(metadata),
-          has_splines = extract_has_splines_from_metadata(metadata),
-          has_time_varying = extract_has_time_varying_from_metadata(metadata),
-          time_varying_type = extract_time_varying_type_from_metadata(metadata),
-          subgroup_var = first(subgroup_var),
-          subgroup_value = first(subgroup_value),
-          calibration_slope_death_subgroup = mean(calibration_slope_death, na.rm = TRUE),
-          calibration_intercept_death_subgroup = mean(calibration_intercept_death, na.rm = TRUE),
-          brier_death_subgroup = mean(brier_death, na.rm = TRUE),
-          death_auc_subgroup = mean(death_auc, na.rm = TRUE),
-          n_subgroup = sum(!is.na(calibration_slope_death)),
-          .groups = "drop"
-        )
-      
-      cv_results[[combination_key]] <- list(
-        base = base_results,
-        time_specific = time_specific_results,
-        subgroup_specific = subgroup_specific_results
-      )
-    }
-  }
-  
-  return(cv_results)
-}
-
-#' Enhanced core function for single fold cross-validation with calibration assessment
-cv_fold_core <- function(fold_num, fold_assignments, 
-                         model_data, crude_rate, 
-                         covariate_formula = NULL, 
-                         prediction_times = c(14, 30),
-                         calibration_covariates = NULL,
-                         calibration_subgroups = NULL,
-                         original_model_entry = NULL) {
-  
-  # Split data
-  train_patients <- fold_assignments$deid_enc_id[fold_assignments$fold != fold_num]
-  test_patients <- fold_assignments$deid_enc_id[fold_assignments$fold == fold_num]
-  
-  train_data <- model_data %>% filter(deid_enc_id %in% train_patients)
-  test_data <- model_data %>% filter(deid_enc_id %in% test_patients)
-  
-  if (nrow(train_data) == 0 || nrow(test_data) == 0) {
-    return(create_empty_fold_result(fold_num, nrow(train_data), nrow(test_data)))
-  }
-  
-  # Recompute crude rates for training data 
-  train_crude_rates <- tryCatch({
-    temp_qmat_list <- list()
-    temp_qmat_list[[unique(train_data$model)[1]]] <- crude_rate$qmat
-    calc_crude_init_rates(train_data, temp_qmat_list)
-  }, error = function(e) {
-    warning(paste("Crude rate calculation failed in fold", fold_num, ":", e$message))
-    temp_list <- list()
-    temp_list[[unique(train_data$model)[1]]] <- crude_rate
-    return(temp_list)
-  })
-  
-  # Extract comprehensive metadata from the original fitted model
-  metadata <- if (!is.null(original_model_entry) && is.list(original_model_entry) && !is.null(original_model_entry$metadata)) {
-    original_model_entry$metadata
-  } else {
-    list()
-  }
-  
-  # Refit model on training data using the unified fit_msm_models function
-  fitted_models_fold <- refit_model_for_fold_unified(train_data, train_crude_rates, metadata)
-  
-  # Extract the fitted model from nested structure
-  model_structure_name <- names(fitted_models_fold)[1]
-  if (is.null(model_structure_name)) {
-    return(create_empty_fold_result(fold_num, nrow(train_data), nrow(test_data)))
-  }
-  
-  formula_key <- names(fitted_models_fold[[model_structure_name]])[1]
-  model_entry <- fitted_models_fold[[model_structure_name]][[formula_key]]
-  
-  fitted_model <- extract_fitted_model(fitted_models_fold, model_structure_name, formula_key, "in cv_fold_core")
-  if (is.null(fitted_model)) {
-    return(create_empty_fold_result(fold_num, nrow(train_data), nrow(test_data)))
-  }
-  
-  if (is.null(fitted_model) || 
-      (is.list(model_entry) && !is.null(model_entry$status) && model_entry$status == "failed")) {
-    return(create_empty_fold_result(fold_num, nrow(train_data), nrow(test_data)))
-  }
-  
-  model_converged <- is.null(fitted_model$opt$convergence) || fitted_model$opt$convergence == 0
-  
-  # Extract baseline covariates and outcomes
-  test_baseline <- test_data %>%
-    group_by(deid_enc_id) %>%
-    slice_min(DaysSinceEntry, with_ties = FALSE) %>%
-    ungroup()
-  
-  test_outcomes <- test_data %>%
-    group_by(deid_enc_id) %>%
-    summarise(
-      total_los = max(DaysSinceEntry, na.rm = TRUE),
-      days_severe = sum(state %in% c("S", "S1", "S2"), na.rm = TRUE),
-      died = any(state == "D"),
-      ever_severe = any(state %in% c("S", "S1", "S2")),
-      final_state = last(state),
-      initial_state = first(state),
-      .groups = "drop"
-    )
-  
-  # Generate predictions using metadata-aware approach
-  all_predictions <- generate_enhanced_predictions_unified(
-    test_outcomes, test_baseline, fitted_model, 
-    metadata, prediction_times, calibration_covariates
-  )
-  
-  # Calculate base performance metrics
-  base_results <- calculate_base_performance_metrics(
-    fold_num, nrow(train_data), nrow(test_data), model_converged,
-    test_outcomes, all_predictions$base_predictions
-  )
-  
-  return(base_results)
-}
-
-# New helper function to refit model using unified structure
-refit_model_for_fold_unified <- function(train_data, train_crude_rates, metadata) {
-  
-  # Extract fitting parameters from metadata
-  covariates <- metadata$input_covariates
-  spline_vars <- metadata$input_spline_vars
-  constraint <- metadata$input_constraint
-  
-  # Extract spline specifications
-  spline_df <- if (!is.null(metadata$spline_config) && !is.null(metadata$spline_config$default_df)) {
-    metadata$spline_config$default_df
-  } else {
-    3
-  }
-  
-  spline_type <- if (!is.null(metadata$spline_config) && !is.null(metadata$spline_config$default_type)) {
-    metadata$spline_config$default_type
-  } else {
-    "ns"
-  }
-  
-  # Extract time-varying specifications
-  time_varying <- if (!is.null(metadata$time_config)) metadata$time_config$type else NULL
-  time_variable <- if (!is.null(metadata$time_config)) metadata$time_config$variable else "DaysSinceEntry"
-  time_breakpoints <- if (!is.null(metadata$time_config)) metadata$time_config$breakpoints else NULL
-  
-  # Call the unified fit_msm_models function
-  fit_msm_models(
-    patient_data = train_data,
-    crude_rates = train_crude_rates,
-    covariates = covariates,
-    spline_vars = spline_vars,
-    spline_df = spline_df,
-    spline_type = spline_type,
-    time_varying = time_varying,
-    time_variable = time_variable,
-    time_breakpoints = time_breakpoints,
-    constraint = constraint %||% "transition_specific"
-  )
-}
-
-# New helper function for metadata-aware predictions
-generate_enhanced_predictions_unified <- function(test_outcomes, test_baseline, fitted_model, 
-                                                  metadata, prediction_times, calibration_covariates) {
-  
-  # Determine which variables to extract from baseline data
-  base_variables <- extract_base_variables_from_metadata(metadata)
-  
-  # Base predictions using metadata-aware approach
-  base_predictions <- map_dfr(test_outcomes$deid_enc_id, function(patient_id) {
-    baseline_covs <- test_baseline %>%
-      filter(deid_enc_id == patient_id) %>%
-      select(any_of(base_variables)) %>%
-      as.list()
-    
-    initial_state <- test_outcomes$initial_state[test_outcomes$deid_enc_id == patient_id]
-    max_time <- max(prediction_times)
-    
-    generate_patient_predictions_unified(patient_id, baseline_covs, initial_state, fitted_model, 
-                                         metadata, max_time)
-  })
-  
-  return(list(
-    base_predictions = base_predictions,
-    time_specific_predictions = NULL,  # Can be extended later
-    covariate_specific_predictions = NULL  # Can be extended later
-  ))
-}
-
-# Enhanced patient prediction function using metadata
-generate_patient_predictions_unified <- function(patient_id, baseline_covs, initial_state, 
-                                                 fitted_model, metadata, prediction_time) {
-  
-  state_names <- rownames(fitted_model$qmodel$qmatrix)
-  state_mapping <- state_name_to_num(initial_state, fitted_model)
-  initial_state_num <- state_mapping[initial_state]
-  if (is.na(initial_state_num)) {
-    warning(paste("Initial state", initial_state, "not found in model, using state 1"))
-    initial_state_num <- 1
-  }
-  
-  tryCatch({
-    # Generate predictions based on whether model has covariates
-    has_covariates <- extract_has_splines_from_metadata(metadata) || 
-      extract_has_time_varying_from_metadata(metadata) ||
-      length(extract_base_variables_from_metadata(metadata)) > 0
-    
-    pmat <- if (has_covariates && length(baseline_covs) > 0) {
-      pmatrix.msm(fitted_model, t = prediction_time, covariates = baseline_covs)
-    } else {
-      pmatrix.msm(fitted_model, t = prediction_time)
-    }
-    
-    probs <- pmat[initial_state_num, ]
-    
-    # Enhanced LOS prediction using metadata about model type
-    sojourn_result <- if (has_covariates && length(baseline_covs) > 0) {
-      sojourn.msm(fitted_model, covariates = baseline_covs)
-    } else {
-      sojourn.msm(fitted_model)
-    }
-    
-    # LOS calculations (keeping existing complex logic but enhanced)
-    transient_states <- state_names[!state_names %in% c("D", "R")]
-    Q_matrix <- fitted_model$qmodel$qmatrix
-    transient_indices <- which(rownames(Q_matrix) %in% transient_states)
-    
-    if (length(transient_indices) > 1) {
-      Q_transient <- Q_matrix[transient_indices, transient_indices]
-      I_matrix <- diag(nrow(Q_transient))
-      
-      tryCatch({
-        N_matrix <- solve(I_matrix - Q_transient)
-        initial_transient_idx <- which(transient_states == initial_state)
-        if (length(initial_transient_idx) == 0) initial_transient_idx <- 1
-        
-        expected_visits <- N_matrix[initial_transient_idx, ]
-        pred_total_los_vis_soj <- sum(expected_visits * sojourn_result$estimates[transient_indices])
-        pred_total_los_soj <- sum(sojourn_result$estimates[transient_indices])
-        pred_total_los <- NA_real_
-        
-      }, error = function(e) {
-        pred_total_los <- sum(sojourn_result$estimates[transient_indices])
-        pred_total_los_vis_soj <- NA_real_
-        pred_total_los_soj <- NA_real_
-      })
-    } else {
-      pred_total_los <- sojourn_result$estimates[transient_indices[1]] %||% NA_real_
-      pred_total_los_soj <- pred_total_los
-      pred_total_los_vis_soj <- pred_total_los
-    }
-    
-    # Severe state predictions
-    severe_states <- state_names[grepl("S", state_names)]
-    if (length(severe_states) > 0) {
-      severe_indices <- which(transient_states %in% severe_states)
-      if (exists("expected_visits") && length(severe_indices) > 0) {
-        pred_days_severe_vis_soj <- sum(expected_visits[severe_indices] * 
-                                          sojourn_result$estimates[severe_indices])
-        pred_days_severe_soj <- sum(probs[severe_indices]) * 
-          mean(sojourn_result$estimates[severe_indices], na.rm = TRUE)
-        pred_days_severe <- NA_real_  
-      } else {
-        pred_days_severe_soj <- NA_real_
-        pred_days_severe_vis_soj <- NA_real_
-        pred_days_severe <- sum(probs[severe_indices]) * 
-          mean(sojourn_result$estimates[severe_indices], na.rm = TRUE)
-      }
-    } else {
-      pred_days_severe <- 0
-      pred_days_severe_soj <- 0
-      pred_days_severe_vis_soj <- 0
-    }
-    
-    data.frame(
-      deid_enc_id = patient_id,
-      pred_prob_death = probs["D"] %||% 0,
-      pred_prob_recovery = probs["R"] %||% 0,
-      pred_prob_severe = sum(probs[severe_states]) %||% 0,
-      pred_total_los = pred_total_los,
-      pred_total_los_soj = pred_total_los_soj,
-      pred_total_los_vis_soj = pred_total_los_vis_soj,
-      pred_days_severe = pred_days_severe,
-      pred_days_severe_soj = pred_days_severe_soj,
-      pred_days_severe_vis_soj = pred_days_severe_vis_soj
-    )
-    
-  }, error = function(e) {
-    data.frame(
-      deid_enc_id = patient_id,
-      pred_prob_death = NA,
-      pred_prob_recovery = NA, 
-      pred_prob_severe = NA,
-      pred_total_los = NA,
-      pred_total_los_soj = NA,
-      pred_total_los_vis_soj = NA,
-      pred_days_severe = NA,
-      pred_days_severe_soj = NA,
-      pred_days_severe_vis_soj = NA
-    )
-  })
-}
-
 # Model fit: ------------------------------------------------------------
 
 #' Calculate transition residuals using pre-computed transition probabilities
@@ -1700,28 +1195,36 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
   all_residuals <- list()
   
   # Process one model at a time to minimize memory usage
-  for (model_structure in names(fitted_msm_models)) {
-    for (formula_name in names(fitted_msm_models[[model_structure]])) {
+  for (model_name in names(fitted_msm_models)) {
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
       
-      if (debug) cat("Processing:", model_structure, "with formula:", formula_name, "\n")
+      if (debug) cat("Processing:", model_name, "with formula:", formula_name, "\n")
       
-      model_entry <- fitted_msm_models[[model_structure]][[formula_name]]
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
       
       # Check if this is a failed model
       if (is.null(model_entry) || 
           (is.list(model_entry) && !is.null(model_entry$status) && model_entry$status == "failed")) {
-        if (debug) cat("Skipping failed model:", model_structure, formula_name, "\n")
+        if (debug) cat("Skipping failed model:", model_name, formula_name, "\n")
         next
       }
       
       # Extract the fitted model object
-      fitted_model <- extract_fitted_model(fitted_msm_models, model_structure, formula_name, "in calculate_transition_residuals")
+      fitted_model <- extract_fitted_model(fitted_msm_models, model_name, formula_name, "in calculate_transition_residuals")
       if (is.null(fitted_model)) next
       
       if (!inherits(fitted_model, "msm")) {
-        if (debug) cat("Invalid model object for:", model_structure, formula_name, "\n")
+        if (debug) cat("Invalid model object for:", model_name, formula_name, "\n")
         next
       }
+      
+      metadata <- if (is.list(model_entry) && !is.null(model_entry$metadata)) {
+        model_entry$metadata
+      } else {
+        list()
+      }
+      
+      model_structure <- metadata$model_structure
       
       # Filter patient data for this model structure - do this early to reduce memory
       model_data <- patient_data[patient_data$model == model_structure, ]
@@ -1757,16 +1260,19 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
       }
       
       if (nrow(observed_transitions) == 0) {
-        if (debug) cat("No transitions found for:", model_structure, formula_name, "\n")
+        if (debug) cat("No transitions found for:", model_name, formula_name, "\n")
         next
       }
       
+      observed_transitions$model_name <- model_name
+      observed_transitions$model_structure <- model_structure
+      
       # Filter pmats for this model/formula combination
       pmats_filtered <- pmats_results %>%
-        filter(model == model_structure, formula == formula_name)
+        filter(model_name == model_name, formula == formula_name)
       
       if (nrow(pmats_filtered) == 0) {
-        if (debug) cat("No pmats results found for:", model_structure, formula_name, "\n")
+        if (debug) cat("No pmats results found for:", model_name, formula_name, "\n")
         next
       }
       
@@ -1780,12 +1286,12 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
       transition_residuals <- observed_transitions %>%
         left_join(
           pmats_filtered %>%
-            select(statename, tostatename, estimate, t_value, model, formula) %>%
+            select(statename, tostatename, estimate, t_value, model_name, formula) %>%
             rename(from_state = statename, 
                    to_state = tostatename, 
                    expected_prob = estimate, 
                    time_diff = t_value),
-          by = c("from_state", "to_state", "time_diff", "model")
+          by = c("from_state", "to_state", "time_diff", "model_name")
         ) %>%
         # Filter out transitions where we don't have matching pmats
         filter(!is.na(expected_prob), expected_prob > 0) %>%
@@ -1806,7 +1312,7 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
         )
       
       if (nrow(transition_residuals) == 0) {
-        if (debug) cat("No valid transitions after filtering for:", model_structure, formula_name, "\n")
+        if (debug) cat("No valid transitions after filtering for:", model_name, formula_name, "\n")
         next
       }
       
@@ -1830,14 +1336,14 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
         )
       
       if (debug) {
-        cat("Calculated residuals for:", model_structure, formula_name, "\n")
+        cat("Calculated residuals for:", model_name, formula_name, "\n")
         cat("Final dimensions:", nrow(transition_residuals), "x", ncol(transition_residuals), "\n")
         cat("Transitions without matching pmats:", 
             nrow(observed_transitions) - nrow(transition_residuals), "\n")
       }
       
       # Store results
-      combo_key <- paste(model_structure, formula_name, sep = "___")
+      combo_key <- paste(model_name, formula_name, sep = "___")
       all_residuals[[combo_key]] <- transition_residuals
       
       # Clean up to free memory
@@ -1858,7 +1364,8 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
     cat("=== DEBUG: Final Combined Results ===\n")
     cat("Total transitions across all models:", nrow(final_residuals), "\n")
     if (nrow(final_residuals) > 0) {
-      cat("Model structures:", paste(unique(final_residuals$model), collapse = ", "), "\n")
+      cat("Model names:", paste(unique(final_residuals$model_name), collapse = ", "), "\n")
+      cat("Model structures:", paste(unique(final_residuals$model_structures), collapse = ", "), "\n")
       cat("Formulas:", paste(unique(final_residuals$formula), collapse = ", "), "\n")
       cat("Time horizons represented:", paste(sort(unique(final_residuals$time_diff)), collapse = ", "), "\n")
     }
@@ -1869,283 +1376,225 @@ calculate_transition_residuals <- function(fitted_msm_models, patient_data,
 
 # Compare models --------------------------------------------
 
-#' Comprehensive model comparison combining within and across structure comparisons
-#' @param fitted_models Nested list of fitted MSM models
-#' @param include_within Include within-structure comparisons (default: TRUE)
-#' @param include_across Include cross-structure comparisons (default: TRUE)  
-#' @param cross_structure_methods Methods for cross-structure comparison
-#' @param cores Number of cores for DRLCV
-#' @return List with within_structure and across_structure comparison results
-comprehensive_model_comparison <- function(fitted_models, include_within = TRUE, 
-                                           include_across = FALSE,
-                                           cross_structure_methods = c("draic"),
-                                           mc.cores = min(6, detectCores() - 1)) {
+#' Compare models within the same structure
+#' 
+#' Compares models that share the same model_structure (from metadata).
+#' Ranks by AIC, BIC, and performs LRT for nested model pairs.
+#' 
+#' @param fitted_models List returned by fit_msm_models()
+#' @return Tibble with one row per model, ranked by AIC, with LRT results for nested pairs
+compare_within_structure <- function(fitted_models) {
   
-  results <- list()
-  
-  if (include_within) {
-    cat("=== Within-Structure Comparisons ===\n")
-    results$within_structure <- compare_within_structure(fitted_models)
-    
-    # Summary of within-structure results
-    within_summary <- results$within_structure %>%
-      group_by(model) %>%
-      summarise(
-        n_models = n(),
-        n_converged = sum(status == "converged", na.rm = TRUE),
-        best_aic_formula = formula[which.min(AIC)],
-        best_aic_value = min(AIC, na.rm = TRUE),
-        .groups = "drop"
-      )
-    
-    cat("Within-structure summary:\n")
-    print(within_summary)
-    
-    best_models <- results$within_structure %>%
-      filter(status == "converged") %>%
-      group_by(model) %>%
-      slice_min(AIC, n = 1) %>%
-      ungroup() %>%
-      arrange(AIC)
-    
-    cat("\n=== Best Model per Structure (by AIC) ===\n")
-    print(best_models %>% select(model, formula, covariate, AIC, BIC, n_params))
-    
+  if (!requireNamespace("dplyr", quietly = TRUE)) {
+    stop("dplyr package is required")
+  }
+  if (!requireNamespace("purrr", quietly = TRUE)) {
+    stop("purrr package is required")
   }
   
-  if (include_across) {
-    cat("\n=== Cross-Structure Comparisons ===\n")
-    results$across_structure <- compare_across_structures(
-      fitted_models, 
-      methods = cross_structure_methods, 
-      cores = mc.cores
-    )
+  library(dplyr)
+  library(purrr)
+  
+  # Extract all models into a flat structure
+  all_models <- map_dfr(names(fitted_models), function(model_name) {
+    formulas <- names(fitted_models[[model_name]])
     
-    # Summary of cross-structure results
-    if ("draic" %in% cross_structure_methods) {
-      draic_summary <- results$across_structure %>%
-        filter(!is.na(draic)) %>%
-        arrange(draic) %>%
-        head(5)
+    map_dfr(formulas, function(formula_name) {
+      entry <- fitted_models[[model_name]][[formula_name]]
       
-      cat("Top 5 model pairs by DRAIC (lower is better for model1):\n")
-      print(draic_summary %>% select(model1_name, model2_name, draic, draic_pval))
-    }
-  }
-  
-  return(results)
-}
-
-#' Compare models within the same structure using AIC, BIC, and LRT with nesting direction detection
-#' @param fitted_models Nested list of fitted MSM models
-#' @param model_structure Which model structure to compare (if NULL, compares all)
-#' @param reference_formula Reference formula for LRT (default: "~ 1")
-#' @param use_tidy_models Whether to use tidy_msm_models for extraction (default: TRUE)
-#' @return Data frame with within-structure comparison metrics
-compare_within_structure <- function(fitted_models, model_structure = NULL, 
-                                     reference_formula = "~ 1", use_tidy_models = TRUE) {
-  
-  validate_model_structure(fitted_models)
-  
-  # Detect nesting direction
-  nesting_info <- detect_nesting_direction(fitted_models)
-  
-  if (nesting_info$direction == "unknown") {
-    warning("Unable to determine nesting direction. No valid models found.")
-    return(data.frame())
-  }
-  
-  cat("Detected nesting direction:", nesting_info$direction, "\n")
-  cat("Structure levels:", paste(nesting_info$structure_levels, collapse = ", "), "\n")
-  cat("Formula levels found:", paste(head(nesting_info$formula_levels, 3), collapse = ", "), 
-      if(length(nesting_info$formula_levels) > 3) "..." else "", "\n")
-  
-  # If no specific structure provided, do this for all structures
-  if (is.null(model_structure)) {
-    all_comparisons <- map_dfr(nesting_info$structure_levels, function(struct) {
-      compare_within_structure(fitted_models, struct, reference_formula, use_tidy_models)
-    })
-    return(all_comparisons)
-  }
-  
-  # Extract models for the specified structure based on nesting direction
-  if (nesting_info$direction == "structure_formula") {
-    # fitted_models[[structure]][[formula]]
-    if (!model_structure %in% names(fitted_models)) {
-      stop(paste("Model structure", model_structure, "not found in fitted_models"))
-    }
-    structure_models <- fitted_models[[model_structure]]
-    
-  } else if (nesting_info$direction == "formula_structure") {
-    # fitted_models[[formula]][[structure]] - need to reorganize
-    structure_models <- list()
-    for (formula_name in names(fitted_models)) {
-      if (model_structure %in% names(fitted_models[[formula_name]])) {
-        structure_models[[formula_name]] <- fitted_models[[formula_name]][[model_structure]]
+      # Skip failed models
+      if (is.null(entry$fitted_model) || entry$status != "converged") {
+        return(NULL)
       }
-    }
-    
-    if (length(structure_models) == 0) {
-      warning(paste("No models found for structure", model_structure))
-      return(data.frame())
-    }
+      
+      model_obj <- entry$fitted_model
+      metadata <- entry$metadata
+      
+      tibble(
+        model_name = model_name,
+        formula = formula_name,
+        model_structure = metadata$model_structure,
+        covariates = list(metadata$original_covariates),
+        spline_vars = list(metadata$spline_vars),
+        final_covariates = list(metadata$final_covariates),
+        AIC = AIC(model_obj),
+        BIC = BIC(model_obj),
+        loglik = logLik(model_obj),
+        n_params = length(model_obj$paramdata$opt$par),
+        model_obj = list(model_obj)
+      )
+    })
+  })
+  
+  if (nrow(all_models) == 0) {
+    warning("No converged models found")
+    return(tibble())
   }
   
-  if (use_tidy_models) {
-    # Create properly nested structure for tidy_msm_models
-    temp_nested <- if (nesting_info$direction == "structure_formula") {
-      setNames(list(structure_models), model_structure)
-    } else {
-      # Reorganize for tidy_msm_models which expects structure_formula nesting
-      temp_structure <- list()
-      temp_structure[[model_structure]] <- structure_models
-      temp_structure
+  # Group by model_structure
+  structures <- unique(all_models$model_structure)
+  
+  results <- map_dfr(structures, function(struct) {
+    
+    struct_models <- all_models %>% filter(model_structure == struct)
+    
+    if (nrow(struct_models) < 2) {
+      # Only one model in this structure - no comparisons possible
+      return(struct_models %>%
+               mutate(
+                 aic_rank = 1,
+                 bic_rank = 1,
+                 lrt_vs_model = NA_character_,
+                 lrt_statistic = NA_real_,
+                 lrt_df = NA_real_,
+                 lrt_pvalue = NA_real_,
+                 is_nested_with = NA_character_
+               ) %>%
+               select(-model_obj, -covariates, -spline_vars, -final_covariates))
     }
     
-    tidied <- tidy_msm_models(temp_nested) %>%
-      filter(model == model_structure, status == "converged")
-    
-    if (nrow(tidied) == 0) {
-      warning(paste("No converged models found for structure", model_structure))
-      return(data.frame())
-    }
-    
-    # Get reference model stats
-    ref_stats <- tidied %>% filter(formula == reference_formula)
-    if (nrow(ref_stats) == 0) {
-      warning(paste("Reference formula", reference_formula, "not found. Using first model as reference."))
-      ref_stats <- tidied[1, ]
-      reference_formula <- ref_stats$formula
-    }
-    
-    # Calculate deltas from reference
-    comparison_results <- tidied %>%
+    # Rank by AIC and BIC
+    struct_models <- struct_models %>%
       mutate(
-        delta_AIC = AIC - ref_stats$AIC,
-        delta_BIC = BIC - ref_stats$BIC,
-        delta_loglik = loglik - ref_stats$loglik,
         aic_rank = rank(AIC),
         bic_rank = rank(BIC)
       )
     
-    # Add LRT results for non-reference models
-    lrt_results <- map_dfr(setdiff(tidied$formula, reference_formula), function(formula) {
+    # Detect nesting relationships
+    nesting_pairs <- find_nested_pairs(struct_models)
+    
+    # Perform LRT for nested pairs
+    lrt_results <- map_dfr(seq_len(nrow(nesting_pairs)), function(i) {
+      pair <- nesting_pairs[i, ]
       
-      # Extract model objects based on nesting direction
-      if (nesting_info$direction == "structure_formula") {
-        ref_model_entry <- structure_models[[reference_formula]]
-        test_model_entry <- structure_models[[formula]]
-      } else {
-        ref_model_entry <- structure_models[[reference_formula]]
-        test_model_entry <- structure_models[[formula]]
-      }
+      model1 <- struct_models %>% filter(model_name == pair$model1_name) %>% pull(model_obj) %>% .[[1]]
+      model2 <- struct_models %>% filter(model_name == pair$model2_name) %>% pull(model_obj) %>% .[[1]]
       
-      ref_model <- if (is.list(ref_model_entry) && !is.null(ref_model_entry$fitted_model)) {
-        ref_model_entry$fitted_model
-      } else {
-        ref_model_entry
-      }
-      
-      test_model <- if (is.list(test_model_entry) && !is.null(test_model_entry$fitted_model)) {
-        test_model_entry$fitted_model
-      } else {
-        test_model_entry
-      }
-      
-      # Replace the LRT calculation section in compare_within_structure function:
-      
-      lrt_result <- tryCatch({
-        if (!is.null(ref_model) && !is.null(test_model) && 
-            inherits(ref_model, "msm") && inherits(test_model, "msm")) {
-          
-          lrt <- lrtest.msm(ref_model, test_model)
-          
-          # Handle different return structures from lrtest.msm
-          if (is.matrix(lrt)) {
-            # Matrix format: extract from first row
-            c(lrt[1, 1], lrt[1, 2], lrt[1, 3])
-          } else if (is.list(lrt)) {
-            # List format: extract named elements
-            c(lrt$statistic, lrt$df, lrt$p.value)
-          } else if (is.vector(lrt) && length(lrt) >= 3) {
-            # Vector format: use first three elements
-            c(lrt[1], lrt[2], lrt[3])
-          } else {
-            # Unknown format - return NAs
-            c(NA, NA, NA)
-          }
+      lrt <- tryCatch({
+        lrt_result <- lrtest.msm(model1, model2)
+        
+        # Handle different return structures from lrtest.msm
+        if (is.matrix(lrt_result)) {
+          list(stat = lrt_result[1, 1], df = lrt_result[1, 2], pval = lrt_result[1, 3])
+        } else if (is.list(lrt_result)) {
+          list(stat = lrt_result$statistic, df = lrt_result$df, pval = lrt_result$p.value)
+        } else if (is.vector(lrt_result) && length(lrt_result) >= 3) {
+          list(stat = lrt_result[1], df = lrt_result[2], pval = lrt_result[3])
         } else {
-          c(NA, NA, NA)
+          list(stat = NA_real_, df = NA_real_, pval = NA_real_)
         }
       }, error = function(e) {
-        warning(paste("LRT failed for", formula, "vs", reference_formula, ":", e$message))
-        c(NA, NA, NA)
-      })      
-      data.frame(
-        formula = formula,
-        lrt_stat = lrt_result[1],
-        lrt_df = lrt_result[2],
-        lrt_pval = lrt_result[3]
+        warning(paste("LRT failed for", pair$model2_name, "vs", pair$model1_name, ":", e$message))
+        list(stat = NA_real_, df = NA_real_, pval = NA_real_)
+      })
+      
+      tibble(
+        model_name = pair$model2_name,
+        lrt_vs_model = pair$model1_name,
+        lrt_statistic = lrt$stat,
+        lrt_df = lrt$df,
+        lrt_pvalue = lrt$pval,
+        nesting_direction = pair$direction
       )
     })
     
-    # Add reference model LRT (all zeros/NAs)
-    ref_lrt <- data.frame(
-      formula = reference_formula,
-      lrt_stat = 0,
-      lrt_df = 0,
-      lrt_pval = 1
-    )
+    # Merge LRT results back
+    result <- struct_models %>%
+      left_join(lrt_results, by = "model_name") %>%
+      select(-model_obj, -covariates, -spline_vars, -final_covariates) %>%
+      arrange(aic_rank)
     
-    lrt_results <- bind_rows(lrt_results, ref_lrt)
-    
-    # Merge results
-    final_results <- comparison_results %>%
-      left_join(lrt_results, by = "formula") %>%
-      mutate(reference_model = reference_formula) %>%
-      arrange(AIC)
-    
-  } else {
-    # Manual extraction (fallback)
-    warning("Manual extraction not fully implemented - using tidy_msm_models")
-    return(compare_within_structure(fitted_models, model_structure, reference_formula, use_tidy_models = TRUE))
-  }
+    return(result)
+  })
   
-  return(final_results)
+  cat("\n=== Within-Structure Model Comparison ===\n")
+  cat("Total models compared:", nrow(results), "\n")
+  cat("Structures:", paste(unique(results$model_structure), collapse = ", "), "\n\n")
+  
+  return(results)
 }
 
-#' Compare models across different structures using DRAIC and DRLCV
-#' @param fitted_models Nested list of fitted MSM models
-#' @param model_pairs Data frame with columns model1_struct, formula1, model2_struct, formula2
-#' @param methods Vector of comparison methods ("draic", "drlcv", or both)
-#' @param cores Number of cores for parallel computation
-#' @return Data frame with cross-structure comparison metrics
-compare_across_structures <- function(fitted_models, model_pairs = NULL, 
-                                      methods = c("draic", "drlcv"), mc.cores = min(6, detectCores() - 1)) {
+
+#' Find nested model pairs within a structure
+#' 
+#' Identifies which models are nested (one's covariates are a subset of another's)
+#' 
+#' @param struct_models Tibble of models from same structure
+#' @return Tibble with model pairs and nesting direction
+find_nested_pairs <- function(struct_models) {
   
-  validate_model_structure(fitted_models)
+  n <- nrow(struct_models)
+  if (n < 2) return(tibble())
   
-  # If no model pairs specified, create all pairwise comparisons
-  if (is.null(model_pairs)) {
-    # Use tidy_msm_models to get all converged models
-    tidied <- tidy_msm_models(fitted_models) %>%
-      filter(status == "converged")
+  pairs <- expand_grid(
+    i = 1:n,
+    j = 1:n
+  ) %>%
+    filter(i < j)
+  
+  nested_pairs <- map_dfr(seq_len(nrow(pairs)), function(idx) {
+    i <- pairs$i[idx]
+    j <- pairs$j[idx]
     
-    if (nrow(tidied) < 2) {
-      stop("Need at least 2 converged models for comparison")
+    model_i <- struct_models[i, ]
+    model_j <- struct_models[j, ]
+    
+    cov_i <- model_i$final_covariates[[1]]
+    cov_j <- model_j$final_covariates[[1]]
+    
+    # Handle NULL or empty covariate lists
+    if (is.null(cov_i)) cov_i <- character(0)
+    if (is.null(cov_j)) cov_j <- character(0)
+    
+    # Check if i is nested in j (i's covariates are subset of j's)
+    i_in_j <- all(cov_i %in% cov_j) && length(cov_i) < length(cov_j)
+    
+    # Check if j is nested in i (j's covariates are subset of i's)
+    j_in_i <- all(cov_j %in% cov_i) && length(cov_j) < length(cov_i)
+    
+    if (i_in_j) {
+      return(tibble(
+        model1_name = model_i$model_name,
+        model2_name = model_j$model_name,
+        direction = "model1_nested_in_model2"
+      ))
+    } else if (j_in_i) {
+      return(tibble(
+        model1_name = model_j$model_name,
+        model2_name = model_i$model_name,
+        direction = "model1_nested_in_model2"
+      ))
+    } else {
+      return(NULL)
     }
-    
-    # Create all pairwise combinations
-    model_pairs <- expand_grid(
-      model1_struct = tidied$model,
-      formula1 = tidied$formula,
-      model2_struct = tidied$model,
-      formula2 = tidied$formula
-    ) %>%
-      filter(!(model1_struct == model2_struct & formula1 == formula2)) %>%  # Remove self-comparisons
-      filter(model1_struct != model2_struct) %>%  # Only cross-structure comparisons
-      distinct()
+  })
+  
+  return(nested_pairs)
+}
+
+
+#' Compare models across different structures using DRAIC and DRLCV
+#' 
+#' @param fitted_models List returned by fit_msm_models()
+#' @param model_pairs List of character vectors, each with 2 model_names to compare
+#'   Example: list(c("base_age_sex", "mod2_age_sex"), c("base_no_cov", "mod2_no_cov"))
+#' @param methods Vector of methods to use: "draic", "drlcv", or both (default: both)
+#' @param mc.cores Number of cores for DRLCV parallelization
+#' @return Tibble with one row per comparison
+compare_across_structures <- function(fitted_models, 
+                                      model_pairs,
+                                      methods = c("draic", "drlcv"),
+                                      mc.cores = min(6, parallel::detectCores() - 1)) {
+  
+  if (!requireNamespace("dplyr", quietly = TRUE)) {
+    stop("dplyr package is required")
   }
+  if (!requireNamespace("purrr", quietly = TRUE)) {
+    stop("purrr package is required")
+  }
+  
+  library(dplyr)
+  library(purrr)
   
   # Validate methods
   valid_methods <- c("draic", "drlcv")
@@ -2154,50 +1603,76 @@ compare_across_structures <- function(fitted_models, model_pairs = NULL,
     stop("At least one valid method must be specified: 'draic' or 'drlcv'")
   }
   
-  # Safe wrappers
-  safe_draic <- safely(draic.msm)
-  safe_drlcv <- safely(drlcv.msm)
+  # Validate model_pairs format
+  if (!is.list(model_pairs)) {
+    stop("model_pairs must be a list of character vectors")
+  }
   
-  cat("Comparing", nrow(model_pairs), "model pairs across structures\n")
+  if (!all(map_lgl(model_pairs, ~ is.character(.) && length(.) == 2))) {
+    stop("Each element of model_pairs must be a character vector of length 2")
+  }
   
-  comparison_results <- model_pairs %>%
-    mutate(
-      
-      model1_obj = map2(model1_struct, formula1, function(struct, form) {
-        extract_fitted_model(fitted_models, struct, form, "in compare_across_structures model1")
-      }),
-      
-      model2_obj = map2(model2_struct, formula1, function(struct, form) {
-        extract_fitted_model(fitted_models, struct, form, "in compare_across_structures model2")
-      })
+  cat("Comparing", length(model_pairs), "model pairs across structures\n")
+  
+  # Convert model_pairs to tibble
+  pairs_df <- map_dfr(model_pairs, function(pair) {
+    tibble(
+      model1_name = pair[1],
+      model2_name = pair[2]
     )
+  })
+  
+  # Extract model objects and metadata
+  results <- pairs_df %>%
+    mutate(
+      model1_obj = map(model1_name, ~ extract_model_object(fitted_models, .)),
+      model2_obj = map(model2_name, ~ extract_model_object(fitted_models, .)),
+      model1_structure = map_chr(model1_name, ~ extract_model_structure(fitted_models, .)),
+      model2_structure = map_chr(model2_name, ~ extract_model_structure(fitted_models, .)),
+      model1_formula = map_chr(model1_name, ~ extract_model_formula(fitted_models, .)),
+      model2_formula = map_chr(model2_name, ~ extract_model_formula(fitted_models, .))
+    )
+  
+  # Check for missing models
+  missing_models <- results %>%
+    filter(map_lgl(model1_obj, is.null) | map_lgl(model2_obj, is.null))
+  
+  if (nrow(missing_models) > 0) {
+    warning("Some requested models were not found or did not converge:")
+    print(missing_models %>% select(model1_name, model2_name))
+    results <- results %>%
+      filter(!map_lgl(model1_obj, is.null), !map_lgl(model2_obj, is.null))
+  }
+  
+  if (nrow(results) == 0) {
+    stop("No valid model pairs to compare")
+  }
   
   # DRAIC comparisons
   if ("draic" %in% methods) {
     cat("Computing DRAIC comparisons...\n")
-    comparison_results <- comparison_results %>%
+    
+    results <- results %>%
       mutate(
         draic_result = map2(model1_obj, model2_obj, function(m1, m2) {
-          if (is.null(m1) || is.null(m2)) return(NULL)
-          
-          result <- safe_draic(m1, m2)
-          if (!is.null(result)) {
+          tryCatch({
+            dr <- draic.msm(m1, m2)
             list(
-              draic = result$result$draic[1],
-              draic_ll = result$result$ti["2.5%"],
-              draic_ul = result$result$ti["97.5%"],
-              draic_pval = result$result$ti["Prob<0"]
+              draic = dr$draic[1],
+              draic_ll = dr$ti["2.5%"],
+              draic_ul = dr$ti["97.5%"],
+              draic_pval = dr$ti["Prob<0"]
             )
-          } else {
-            warning(paste("DRAIC failed:", result$error$message))
-            NULL
-          }
+          }, error = function(e) {
+            warning(paste("DRAIC failed:", e$message))
+            list(draic = NA_real_, draic_ll = NA_real_, 
+                 draic_ul = NA_real_, draic_pval = NA_real_)
+          })
         }),
-        
-        draic      = map_dbl(draic_result, pluck, "draic", .default = NA_real_),
-        draic_ll   = map_dbl(draic_result, pluck, "draic_ll", .default = NA_real_),
-        draic_ul   = map_dbl(draic_result, pluck, "draic_ul", .default = NA_real_),
-        draic_pval = map_dbl(draic_result, pluck, "draic_pval", .default = NA_real_)
+        draic = map_dbl(draic_result, "draic"),
+        draic_ll = map_dbl(draic_result, "draic_ll"),
+        draic_ul = map_dbl(draic_result, "draic_ul"),
+        draic_pval = map_dbl(draic_result, "draic_pval")
       ) %>%
       select(-draic_result)
   }
@@ -2205,617 +1680,113 @@ compare_across_structures <- function(fitted_models, model_pairs = NULL,
   # DRLCV comparisons
   if ("drlcv" %in% methods) {
     cat("Computing DRLCV comparisons (this may take a while)...\n")
-    comparison_results <- comparison_results %>%
+    
+    results <- results %>%
       mutate(
         drlcv_result = map2(model1_obj, model2_obj, function(m1, m2) {
-          if (is.null(m1) || is.null(m2)) return(NULL)
-          
-          result <- safe_drlcv(m1, m2, cores = mc.cores, verbose = FALSE)
-          if (!is.null(result$result)) {
+          tryCatch({
+            dr <- drlcv.msm(m1, m2, cores = mc.cores, verbose = FALSE)
             list(
-              drlcv = result$result$drlcv[1],
-              drlcv_ll = result$result$ti["2.5%"],
-              drlcv_ul = result$result$ti["97.5%"],
-              drlcv_pval = result$result$ti["Prob<0"]
+              drlcv = dr$drlcv[1],
+              drlcv_ll = dr$ti["2.5%"],
+              drlcv_ul = dr$ti["97.5%"],
+              drlcv_pval = dr$ti["Prob<0"]
             )
-          } else {
-            warning(paste("DRLCV failed:", result$error$message))
-            NULL
-          }
+          }, error = function(e) {
+            warning(paste("DRLCV failed:", e$message))
+            list(drlcv = NA_real_, drlcv_ll = NA_real_, 
+                 drlcv_ul = NA_real_, drlcv_pval = NA_real_)
+          })
         }),
-        
-        drlcv      = map_dbl(drlcv_result, pluck, "drlcv",     .default = NA_real_),
-        drlcv_ll   = map_dbl(drlcv_result, pluck, "drlcv_ll",  .default = NA_real_),
-        drlcv_ul   = map_dbl(drlcv_result, pluck, "drlcv_ul",  .default = NA_real_),
-        drlcv_pval = map_dbl(drlcv_result, pluck, "drlcv_pval",.default = NA_real_)
+        drlcv = map_dbl(drlcv_result, "drlcv"),
+        drlcv_ll = map_dbl(drlcv_result, "drlcv_ll"),
+        drlcv_ul = map_dbl(drlcv_result, "drlcv_ul"),
+        drlcv_pval = map_dbl(drlcv_result, "drlcv_pval")
       ) %>%
       select(-drlcv_result)
   }
   
-  # Clean up and add interpretive columns
-  final_results <- comparison_results %>%
-    select(-model1_obj, -model2_obj) %>%
-    mutate(
-      model1_name = paste(model1_struct, formula1, sep = " | "),
-      model2_name = paste(model2_struct, formula2, sep = " | "),
-      comparison_type = "cross_structure"
-    )
+  # Clean up
+  final_results <- results %>%
+    select(-model1_obj, -model2_obj)
+  
+  cat("\n=== Cross-Structure Model Comparison ===\n")
+  cat("Comparisons completed:", nrow(final_results), "\n")
+  if ("draic" %in% methods) {
+    cat("DRAIC: lower values favor model1\n")
+  }
+  if ("drlcv" %in% methods) {
+    cat("DRLCV: lower values favor model1\n")
+  }
+  cat("\n")
   
   return(final_results)
 }
 
-#' Detect the nesting direction of fitted models by examining structure
-#' @param fitted_models Nested list structure to analyze
-#' @return List with direction, structure_levels, and formula_levels
-detect_nesting_direction <- function(fitted_models) {
-  
-  if (!is.list(fitted_models) || length(fitted_models) == 0) {
-    return(list(
-      direction = "unknown", 
-      structure_levels = character(), 
-      formula_levels = character(),
-      confidence = 0
-    ))
+
+#' Helper: Extract fitted model object from fitted_models list
+#' @param fitted_models List from fit_msm_models()
+#' @param model_name Character string of model name
+#' @return msm model object or NULL if not found/converged
+extract_model_object <- function(fitted_models, model_name) {
+  if (!model_name %in% names(fitted_models)) {
+    warning(paste("Model", model_name, "not found in fitted_models"))
+    return(NULL)
   }
   
-  # Get the first level names
-  first_level_names <- names(fitted_models)
-  if (is.null(first_level_names) || length(first_level_names) == 0) {
-    return(list(
-      direction = "unknown", 
-      structure_levels = character(), 
-      formula_levels = character(),
-      confidence = 0
-    ))
+  model_entry <- fitted_models[[model_name]]
+  formula_names <- names(model_entry)
+  
+  if (length(formula_names) == 0) {
+    warning(paste("No formulas found for model", model_name))
+    return(NULL)
   }
   
-  # Examine several elements to get a robust assessment
-  sample_size <- min(3, length(fitted_models))
-  sample_elements <- fitted_models[1:sample_size]
+  # Get first formula (there should only be one per model_name typically)
+  entry <- model_entry[[formula_names[1]]]
   
-  structure_evidence <- list()
-  
-  for (i in seq_along(sample_elements)) {
-    element_name <- names(sample_elements)[i]
-    element <- sample_elements[[i]]
-    
-    if (!is.list(element)) {
-      structure_evidence[[i]] <- list(
-        first_level = element_name,
-        is_list = FALSE,
-        direction = "unknown"
-      )
-      next
-    }
-    
-    second_level_names <- names(element)
-    if (is.null(second_level_names) || length(second_level_names) == 0) {
-      structure_evidence[[i]] <- list(
-        first_level = element_name,
-        second_level = character(),
-        is_nested = FALSE,
-        direction = "unknown"
-      )
-      next
-    }
-    
-    # Examine the deepest accessible level
-    deep_samples <- list()
-    deep_sample_count <- min(2, length(element))
-    
-    for (j in 1:deep_sample_count) {
-      deep_element <- element[[j]]
-      deep_name <- names(element)[j]
-      
-      deep_samples[[j]] <- list(
-        name = deep_name,
-        is_msm = inherits(deep_element, "msm"),
-        has_fitted_model = is.list(deep_element) && "fitted_model" %in% names(deep_element),
-        has_status = is.list(deep_element) && "status" %in% names(deep_element),
-        is_list = is.list(deep_element),
-        class = class(deep_element)[1]
-      )
-    }
-    
-    # Determine what this element suggests about nesting direction
-    has_msm_objects <- any(sapply(deep_samples, function(x) x$is_msm))
-    has_fitted_model_structure <- any(sapply(deep_samples, function(x) x$has_fitted_model))
-    
-    # Check if second level names look like formulas
-    second_level_is_formula <- any(grepl("^~", second_level_names)) ||
-      any(second_level_names %in% c("~ 1", "~1"))
-    
-    # Check if first level name looks like a model structure identifier
-    first_level_looks_structural <- grepl("model|mod_|base|sev|trans|hx_", element_name, ignore.case = TRUE)
-    
-    structure_evidence[[i]] <- list(
-      first_level = element_name,
-      second_level = second_level_names,
-      has_msm_objects = has_msm_objects,
-      has_fitted_model_structure = has_fitted_model_structure,
-      second_level_is_formula = second_level_is_formula,
-      first_level_looks_structural = first_level_looks_structural,
-      deep_samples = deep_samples
-    )
+  if (is.null(entry$fitted_model) || entry$status != "converged") {
+    warning(paste("Model", model_name, "did not converge"))
+    return(NULL)
   }
   
-  # Aggregate evidence to determine direction
-  votes_structure_formula <- 0
-  votes_formula_structure <- 0
-  confidence_score <- 0
-  
-  for (evidence in structure_evidence) {
-    # Vote based on multiple criteria
-    
-    # Strong evidence for structure -> formula nesting
-    if (evidence$has_fitted_model_structure && evidence$second_level_is_formula) {
-      votes_structure_formula <- votes_structure_formula + 3
-    }
-    
-    if (evidence$first_level_looks_structural && evidence$second_level_is_formula) {
-      votes_structure_formula <- votes_structure_formula + 2  
-    }
-    
-    if (evidence$has_msm_objects) {
-      votes_structure_formula <- votes_structure_formula + 1
-    }
-    
-    # Evidence for formula -> structure nesting would need different checks
-    # (This is less common in the MSM context, but we can add checks if needed)
-    
-    # Add to confidence based on quality of evidence
-    if (evidence$has_fitted_model_structure) confidence_score <- confidence_score + 0.4
-    if (evidence$has_msm_objects) confidence_score <- confidence_score + 0.3
-    if (evidence$second_level_is_formula) confidence_score <- confidence_score + 0.2
-    if (evidence$first_level_looks_structural) confidence_score <- confidence_score + 0.1
-  }
-  
-  # Determine final direction
-  if (votes_structure_formula > votes_formula_structure) {
-    direction <- "structure_formula"
-    structure_levels <- first_level_names
-    formula_levels <- unique(unlist(lapply(fitted_models, names)))
-  } else if (votes_formula_structure > votes_structure_formula) {
-    direction <- "formula_structure"
-    formula_levels <- first_level_names  
-    structure_levels <- unique(unlist(lapply(fitted_models, names)))
-  } else {
-    # Default assumption based on MSM patterns
-    direction <- "structure_formula"
-    structure_levels <- first_level_names
-    formula_levels <- unique(unlist(lapply(fitted_models, names)))
-    confidence_score <- confidence_score * 0.5  # Lower confidence for default
-  }
-  
-  return(list(
-    direction = direction,
-    structure_levels = structure_levels,
-    formula_levels = formula_levels,
-    confidence = min(confidence_score, 1.0),
-    evidence_summary = list(
-      votes_structure_formula = votes_structure_formula,
-      votes_formula_structure = votes_formula_structure,
-      sample_count = length(structure_evidence)
-    ),
-    debug_info = structure_evidence
-  ))
+  return(entry$fitted_model)
 }
 
 
-# Comprehensive wrapper for base performance metrics calculation ----
-
-run_comprehensive_msm_analysis <- function(fitted_msm_models, 
-                                           patient_data, 
-                                           crude_rates,
-                                           analysis_config = list(),
-                                           parallel = TRUE,
-                                           mc.cores = NULL,
-                                           verbose = TRUE) {
+#' Helper: Extract model structure from metadata
+#' @param fitted_models List from fit_msm_models()
+#' @param model_name Character string of model name
+#' @return Character string of model_structure or NA
+extract_model_structure <- function(fitted_models, model_name) {
+  if (!model_name %in% names(fitted_models)) return(NA_character_)
   
-  # Validate inputs
-  if (!is.list(fitted_msm_models) || length(fitted_msm_models) == 0) {
-    stop("fitted_msm_models must be a non-empty list")
-  }
+  model_entry <- fitted_models[[model_name]]
+  formula_names <- names(model_entry)
+  if (length(formula_names) == 0) return(NA_character_)
   
-  validate_model_structure(fitted_msm_models)
-  
-  if (!is.data.frame(patient_data)) {
-    stop("patient_data must be a data frame")
-  }
-  
-  if (!is.list(crude_rates)) {
-    stop("crude_rates must be a list")
-  }
-  
-  # Setup parallel processing
-  if (is.null(mc.cores)) {
-    mc.cores <- min(8, parallel::detectCores() - 1)
-  }
-  
-  # Default configuration
-  default_config <- list(
-    # Model summary parameters
-    tidy_models = list(),
-    
-    # Q-matrix parameters
-    qmatrix = list(
-      covariates_list = NULL,
-      mc.cores = mc.cores
-    ),
-    
-    # P-matrix parameters  
-    pmats = list(
-      t_values = time_vec,
-      covariates_list = NULL,
-      mc.cores = mc.cores
-    ),
-    
-    # Sojourn time parameters
-    sojourns = list(
-      covariates_list = NULL
-    ),
-    
-    # Prevalence parameters
-    prevalence = list(
-      time_points = time_vec,
-      covariates_list = NULL,
-      ci = TRUE,
-      ci_method = "normal",
-      use_approximation = FALSE,
-      mc.cores = mc.cores
-    ),
-    
-    # Hazard ratio parameters
-    hazards = list(
-      hazard_scale = 1
-    ),
-    
-    # Cross-validation parameters
-    cv = list(
-      k_folds = 3,
-      prediction_times = time_vec,
-      stratify_by = "final_state",
-      calibration_covariates = NULL,
-      calibration_subgroups = NULL,
-      parallel = parallel,
-      n_cores = mc.cores
-    ),
-    
-    # Residual analysis parameters
-    residuals = list(
-      residual_type = "deviance",
-      debug = verbose
-    ),
-    
-    # Model comparison parameters
-    comparison = list(
-      include_within = TRUE,
-      include_across = TRUE,
-      cross_structure_methods = c("draic", "drlcv"),
-      mc.cores = mc.cores
-    )
-  )
-  
-  # Merge user config with defaults
-  config <- modifyList(default_config, analysis_config)
-  
-  # Initialize results list
-  results <- list(
-    metadata = list(
-      run_time = Sys.time(),
-      n_structures = length(fitted_msm_models),
-      total_models = sum(sapply(fitted_msm_models, length)),
-      config = config,
-      parallel = parallel,
-      mc.cores = mc.cores
-    )
-  )
-  
-  if (verbose) {
-    cat("=== COMPREHENSIVE MSM ANALYSIS ===\n")
-    cat("Structures:", length(fitted_msm_models), "\n")
-    cat("Total models:", sum(sapply(fitted_msm_models, length)), "\n")
-    cat("Parallel processing:", ifelse(parallel, paste("enabled (", mc.cores, "cores)"), "disabled"), "\n")
-    cat("\n")
-  }
-  
-  # 1. Model Summary
-  if (verbose) cat("1. Tidying model summaries...\n")
-  results$model_summary <- tryCatch({
-    tidy_msm_models(fitted_msm_models)
-  }, error = function(e) {
-    warning(paste("tidy_msm_models failed:", e$message))
-    data.frame()
-  })
-  
-  if (verbose && nrow(results$model_summary) > 0) {
-    converged <- sum(results$model_summary$status == "converged", na.rm = TRUE)
-    cat("   -", converged, "of", nrow(results$model_summary), "models converged\n")
-  }
-  
-  # 2. Transition Intensities (Q-matrix)
-  if (verbose) cat("2. Extracting transition intensities...\n")
-  results$qmatrix <- tryCatch({
-    tidy_msm_qmatrix(fitted_msm_models, 
-                     covariates_list = config$qmatrix$covariates_list,
-                     ci_type = "normal",
-                     mc.cores = config$qmatrix$mc.cores)
-  }, error = function(e) {
-    warning(paste("tidy_msm_qmatrix failed:", e$message))
-    data.frame()
-  })
-  
-  # 3. Transition Probabilities (P-matrix)
-  if (verbose) cat("3. Calculating transition probabilities...\n")
-  results$pmats <- tryCatch({
-    tidy_msm_pmats(fitted_msm_models,
-                   t_values = config$pmats$t_values,
-                   covariates_list = config$pmats$covariates_list,
-                   ci_type = "normal",
-                   mc.cores = config$pmats$mc.cores)
-  }, error = function(e) {
-    warning(paste("tidy_msm_pmats failed:", e$message))
-    data.frame()
-  })
-  
-  # 4. Sojourn Times
-  if (verbose) cat("4. Extracting sojourn times...\n")
-  results$sojourns <- tryCatch({
-    tidy_msm_sojourns(fitted_msm_models, 
-                      covariates_list = config$sojourns$covariates_list)
-  }, error = function(e) {
-    warning(paste("tidy_msm_sojourns failed:", e$message))
-    data.frame()
-  })
-  
-  # 5. State Prevalences (most computationally intensive)
-  if (!isTRUE(config$prevalence$skip)) {
-    if (verbose) cat("5. Computing state prevalences...\n")
-    prevalence_start_time <- Sys.time()
-    results$prevalence <- tryCatch({
-      do.call(tidy_msm_prevalences, c(list(fitted_msm_models), config$prevalence))
-    }, error = function(e) {
-      warning(paste("tidy_msm_prevalences failed:", e$message))
-      data.frame()
-    })
-    prevalence_duration <- Sys.time() - prevalence_start_time
-    if (verbose) cat("   - Completed in", round(as.numeric(prevalence_duration, units = "secs"), 1), "seconds\n")
-  } else {
-    if (verbose) cat("5. Skipping state prevalences (skip = TRUE)\n")
-    results$prevalence <- data.frame()
-  }
-  
-  # 6. Hazard Ratios (only for models with covariates)
-  if (!isTRUE(config$hazards$skip)) {
-    if (verbose) cat("6. Calculating hazard ratios...\n")
-    results$hazards <- tryCatch({
-      tidy_msm_hazards(fitted_msm_models, hazard_scale = config$hazards$hazard_scale)
-    }, error = function(e) {
-      warning(paste("tidy_msm_hazards failed:", e$message))
-      data.frame()
-    })
-  } else {
-    if (verbose) cat("6. Skipping hazard ratios (skip = TRUE)\n")
-    results$hazards <- data.frame()
-  }
-  
-  # 7. Cross-Validation and Predictive Performance
-  if (!isTRUE(config$cv$skip)) {
-    if (verbose) cat("7. Running cross-validation...\n")
-    cv_start_time <- Sys.time()
-    results$predictive_performance <- tryCatch({
-      calculate_predictive_performance(
-        patient_data = patient_data, 
-        fitted_models = fitted_msm_models, 
-        crude_rates = crude_rates,
-        k_folds = config$cv$k_folds,
-        prediction_times = config$cv$prediction_times,
-        stratify_by = config$cv$stratify_by,
-        calibration_covariates = config$cv$calibration_covariates,
-        calibration_subgroups = config$cv$calibration_subgroups,
-        parallel = config$cv$parallel,
-        n_cores = config$cv$n_cores
-      )
-    }, error = function(e) {
-      warning(paste("calculate_predictive_performance failed:", e$message))
-      list()
-    })
-    cv_duration <- Sys.time() - cv_start_time
-    if (verbose) cat("   - Completed in", round(as.numeric(cv_duration, units = "mins"), 1), "minutes\n")
-  } else {
-    if (verbose) cat("7. Skipping cross-validation (skip = TRUE)\n")
-    results$predictive_performance <- list()
-  }
-  
-  # 8. Transition Residuals
-  if (!isTRUE(config$residuals$skip)) {
-    if (verbose) cat("8. Computing transition residuals...\n")
-    results$residuals <- tryCatch({
-      do.call(calculate_transition_residuals, 
-              c(list(fitted_msm_models = fitted_msm_models,
-                     patient_data = patient_data,
-                     pmats_results = results$pmats),  # Pass pre-computed pmats
-                config$residuals))
-    }, error = function(e) {
-      warning(paste("calculate_transition_residuals failed:", e$message))
-      data.frame()
-    })
-  } else {
-    if (verbose) cat("8. Skipping transition residuals (skip = TRUE)\n")
-    results$residuals <- data.frame()
-  }
-  
-  # 9. Comprehensive Model Comparison
-  if (verbose) cat("9. Running model comparisons...\n")
-  comparison_start_time <- Sys.time()
-  results$model_comparison <- tryCatch({
-    comprehensive_model_comparison(
-      fitted_models = fitted_msm_models,
-      include_within = config$comparison$include_within,
-      include_across = config$comparison$include_across,
-      cross_structure_methods = config$comparison$cross_structure_methods,
-      mc.cores = config$comparison$mc.cores
-    )
-  }, error = function(e) {
-    warning(paste("comprehensive_model_comparison failed:", e$message))
-    list()
-  })
-  comparison_duration <- Sys.time() - comparison_start_time
-  if (verbose) cat("   - Completed in", round(as.numeric(comparison_duration, units = "secs"), 1), "seconds\n")
-  
-  # Final metadata
-  total_duration <- Sys.time() - results$metadata$run_time
-  results$metadata$total_runtime <- total_duration
-  results$metadata$components_completed <- sum(!sapply(results[2:length(results)], function(x) {
-    is.data.frame(x) && nrow(x) == 0 || is.list(x) && length(x) == 0
-  }))
-  
-  if (verbose) {
-    cat("\n=== ANALYSIS COMPLETE ===\n")
-    cat("Total runtime:", round(as.numeric(total_duration, units = "mins"), 1), "minutes\n")
-    cat("Components completed:", results$metadata$components_completed, "of 9\n")
-    cat("Result object size:", format(object.size(results), units = "Mb"), "\n")
-  }
-  
-  # Add helper attributes for easier access
-  class(results) <- c("msm_analysis_results", "list")
-  attr(results, "summary") <- create_analysis_summary(results)
-  
-  return(results)
+  entry <- model_entry[[formula_names[1]]]
+  return(entry$metadata$model_structure %||% NA_character_)
 }
 
 
-## Print analysis ----------------------------------------------------------
-
-#' Create a summary of analysis results
-#' @param results Output from run_comprehensive_msm_analysis
-#' @return Data frame summarizing key findings
-create_analysis_summary <- function(results) {
+#' Helper: Extract formula name from fitted_models
+#' @param fitted_models List from fit_msm_models()
+#' @param model_name Character string of model name
+#' @return Character string of formula or NA
+extract_model_formula <- function(fitted_models, model_name) {
+  if (!model_name %in% names(fitted_models)) return(NA_character_)
   
-  summary_list <- list()
+  model_entry <- fitted_models[[model_name]]
+  formula_names <- names(model_entry)
+  if (length(formula_names) == 0) return(NA_character_)
   
-  # Model convergence summary
-  if (!is.null(results$model_summary) && nrow(results$model_summary) > 0) {
-    model_stats <- results$model_summary %>%
-      group_by(model) %>%
-      summarise(
-        total_models = n(),
-        converged = sum(status == "converged", na.rm = TRUE),
-        best_aic = min(AIC[status == "converged"], na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
-      mutate(convergence_rate = converged / total_models)
-    
-    summary_list$model_convergence <- model_stats
-  }
-  
-  # Cross-validation performance summary
-  if (!is.null(results$predictive_performance) && length(results$predictive_performance) > 0) {
-    cv_summary <- map_dfr(names(results$predictive_performance), function(model_key) {
-      cv_data <- results$predictive_performance[[model_key]]
-      if (!is.null(cv_data$base)) {
-        cv_data$base %>%
-          select(model, formula, death_auc_cv, calibration_slope_death_cv, n_folds_converged) %>%
-          mutate(model_key = model_key)
-      }
-    })
-    
-    if (nrow(cv_summary) > 0) {
-      summary_list$predictive_performance <- cv_summary %>%
-        arrange(desc(death_auc_cv)) %>%
-        head(10)  # Top 10 by AUC
-    }
-  }
-  
-  # Model comparison summary
-  if (!is.null(results$model_comparison) && !is.null(results$model_comparison$within_structure)) {
-    comparison_summary <- results$model_comparison$within_structure %>%
-      filter(status == "converged") %>%
-      group_by(model) %>%
-      slice_min(AIC, n = 1) %>%
-      ungroup() %>%
-      arrange(AIC) %>%
-      select(model, formula, covariate, AIC, BIC, n_params)
-    
-    summary_list$best_models <- comparison_summary
-  }
-  
-  return(summary_list)
+  return(formula_names[1])
 }
 
-#' Print method for MSM analysis results
-#' @param x MSM analysis results object
-#' @param ... Additional arguments
-print.msm_analysis_results <- function(x, ...) {
-  cat("MSM Analysis Results\n")
-  cat("====================\n")
-  cat("Run time:", format(x$metadata$run_time), "\n")
-  cat("Total runtime:", round(as.numeric(x$metadata$total_runtime, units = "mins"), 1), "minutes\n")
-  cat("Components completed:", x$metadata$components_completed, "of 9\n\n")
-  
-  # Print component sizes
-  component_sizes <- sapply(x[2:length(x)], function(comp) {
-    if (is.data.frame(comp)) {
-      paste0(nrow(comp), " rows")
-    } else if (is.list(comp)) {
-      paste0(length(comp), " elements")
-    } else {
-      "unknown"
-    }
-  })
-  
-  cat("Components:\n")
-  for (i in seq_along(component_sizes)) {
-    cat("  ", names(component_sizes)[i], ":", component_sizes[i], "\n")
-  }
-  
-  # Print summary if available
-  if (!is.null(attr(x, "summary"))) {
-    cat("\nKey Findings:\n")
-    summary_obj <- attr(x, "summary")
-    
-    if (!is.null(summary_obj$model_convergence)) {
-      cat("- Model convergence rates:\n")
-      print(summary_obj$model_convergence)
-    }
-    
-    if (!is.null(summary_obj$best_models)) {
-      cat("\n- Best models by AIC:\n")
-      print(head(summary_obj$best_models, 3))
-    }
-  }
-}
 
-#' Extract specific analysis component with error handling
-#' @param results MSM analysis results object
-#' @param component Component name to extract
-#' @return Requested component or informative error
-extract_component <- function(results, component) {
-  
-  valid_components <- c("model_summary", "qmatrix", "pmats", "sojourns", 
-                        "prevalence", "hazards", "predictive_performance", 
-                        "residuals", "model_comparison")
-  
-  if (!component %in% valid_components) {
-    stop(paste("Invalid component. Must be one of:", 
-               paste(valid_components, collapse = ", ")))
-  }
-  
-  if (!component %in% names(results)) {
-    stop(paste("Component", component, "not found in results"))
-  }
-  
-  comp_data <- results[[component]]
-  
-  # Add informative messages for empty results
-  if (is.data.frame(comp_data) && nrow(comp_data) == 0) {
-    message(paste("Component", component, "is empty - check for analysis errors"))
-  } else if (is.list(comp_data) && length(comp_data) == 0) {
-    message(paste("Component", component, "is empty - check for analysis errors"))
-  }
-  
-  return(comp_data)
-}
+# Define %||% operator if not already defined
+`%||%` <- function(x, y) if (is.null(x)) y else x
 
 
 # Helper functions ------------------------------------------------------
@@ -2854,46 +1825,46 @@ calculate_auc_safe <- function(outcome, prediction) {
   }
 }
 
-extract_fitted_model <- function(fitted_models, structure, formula, context = "") {
-  if (!structure %in% names(fitted_models)) {
-    warning(paste("Structure", structure, "not found in fitted_models", context))
+extract_fitted_model <- function(fitted_models, model_name, formula, context = "") {
+  if (!model_name %in% names(fitted_models)) {
+    warning(paste("Model", model_name, "not found in fitted_models", context))
     return(NULL)
   }
   
-  if (!formula %in% names(fitted_models[[structure]])) {
-    warning(paste("Formula", formula, "not found in structure", structure, context))
+  if (!formula %in% names(fitted_models[[model_name]])) {
+    warning(paste("Formula", formula, "not found in model", model_name, context))
     return(NULL)
   }
   
-  model_entry <- fitted_models[[structure]][[formula]]
+  model_entry <- fitted_models[[model_name]][[formula]]
   
   # Handle the new unified structure
   if (!is.list(model_entry)) {
-    warning(paste("Invalid model structure for", structure, formula, 
+    warning(paste("Invalid model name for", model_name, formula, 
                   "- expected list with $fitted_model component", context))
     return(NULL)
   }
   
   if (!"fitted_model" %in% names(model_entry)) {
-    warning(paste("Missing fitted_model component for", structure, formula, context))
+    warning(paste("Missing fitted_model component for", model_name, formula, context))
     return(NULL)
   }
   
   # Check if model failed
   if (!is.null(model_entry$status) && model_entry$status == "failed") {
-    warning(paste("Model failed for", structure, formula, context))
+    warning(paste("Model failed for", model_name, formula, context))
     return(NULL)
   }
   
   # Additional check that the fitted_model is actually an msm object
   fitted_model <- model_entry$fitted_model
   if (is.null(fitted_model)) {
-    warning(paste("fitted_model is NULL for", structure, formula, context))
+    warning(paste("fitted_model is NULL for", model_name, formula, context))
     return(NULL)
   }
   
   if (!inherits(fitted_model, "msm")) {
-    warning(paste("fitted_model is not an msm object for", structure, formula, context))
+    warning(paste("fitted_model is not an msm object for", model_name, formula, context))
     return(NULL)
   }
   
@@ -2905,16 +1876,16 @@ validate_model_structure <- function(fitted_models) {
     stop("fitted_models must be a non-empty list")
   }
   
-  for (structure in names(fitted_models)) {
-    structure_models <- fitted_models[[structure]]
+  for (model_name in names(fitted_models)) {
+    structure_models <- fitted_models[[model_name]]
     
     if (!is.list(structure_models)) {
-      stop(paste("Invalid structure: fitted_models[[", structure, 
+      stop(paste("Invalid model: fitted_models[[", model_name, 
                  "]] must be a list of model entries"))
     }
     
     if (length(structure_models) == 0) {
-      warning(paste("Empty structure:", structure, "- no models found"))
+      warning(paste("Empty name:", model_name, "- no models found"))
       next
     }
     
@@ -2922,7 +1893,7 @@ validate_model_structure <- function(fitted_models) {
       entry <- structure_models[[formula]]
       
       if (!is.list(entry)) {
-        stop(paste("Invalid entry: fitted_models[[", structure, "]][[", formula, 
+        stop(paste("Invalid entry: fitted_models[[", model_name, "]][[", formula, 
                    "]] must be a list with required components"))
       }
       
@@ -2931,31 +1902,31 @@ validate_model_structure <- function(fitted_models) {
       missing_components <- setdiff(required_components, names(entry))
       
       if (length(missing_components) > 0) {
-        stop(paste("Missing components in fitted_models[[", structure, "]][[", formula, 
+        stop(paste("Missing components in fitted_models[[", model_name, "]][[", formula, 
                    "]]: ", paste(missing_components, collapse = ", ")))
       }
       
       # Validate status values
       valid_statuses <- c("converged", "failed", "converged_with_warning")
       if (!is.null(entry$status) && !entry$status %in% valid_statuses) {
-        warning(paste("Invalid status '", entry$status, "' for", structure, formula, 
+        warning(paste("Invalid status '", entry$status, "' for", model_name, formula, 
                       ". Expected one of:", paste(valid_statuses, collapse = ", ")))
       }
       
       # Check that successful models have valid msm objects
       if (entry$status == "converged") {
         if (is.null(entry$fitted_model)) {
-          stop(paste("Converged model has NULL fitted_model:", structure, formula))
+          stop(paste("Converged model has NULL fitted_model:", model_name, formula))
         }
         
         if (!inherits(entry$fitted_model, "msm")) {
-          stop(paste("fitted_model is not an msm object:", structure, formula))
+          stop(paste("fitted_model is not an msm object:", model_name, formula))
         }
       }
       
       # Validate metadata structure
       if (!is.null(entry$metadata) && !is.list(entry$metadata)) {
-        warning(paste("Metadata should be a list for", structure, formula))
+        warning(paste("Metadata should be a list for", model_name, formula))
       }
     }
   }
@@ -2969,8 +1940,8 @@ summarize_model_structure <- function(fitted_models) {
   
   structure_summary <- list()
   
-  for (structure in names(fitted_models)) {
-    structure_models <- fitted_models[[structure]]
+  for (model_name in names(fitted_models)) {
+    structure_models <- fitted_models[[model_name]]
     
     total_models <- length(structure_models)
     converged_models <- sum(sapply(structure_models, function(x) x$status == "converged"))
@@ -2991,7 +1962,7 @@ summarize_model_structure <- function(fitted_models) {
       return(FALSE)
     }))
     
-    structure_summary[[structure]] <- list(
+    structure_summary[[model_name]] <- list(
       total_models = total_models,
       converged = converged_models,
       failed = failed_models,
@@ -3010,20 +1981,20 @@ extract_successful_models <- function(fitted_models) {
   
   successful_models <- list()
   
-  for (structure in names(fitted_models)) {
-    successful_models[[structure]] <- list()
+  for (model_name in names(fitted_models)) {
+    successful_models[[model_name]] <- list()
     
-    for (formula in names(fitted_models[[structure]])) {
-      model_entry <- fitted_models[[structure]][[formula]]
+    for (formula in names(fitted_models[[model_name]])) {
+      model_entry <- fitted_models[[model_name]][[formula]]
       
       if (model_entry$status == "converged" && !is.null(model_entry$fitted_model)) {
-        successful_models[[structure]][[formula]] <- model_entry
+        successful_models[[model_name]][[formula]] <- model_entry
       }
     }
     
     # Remove empty structures
-    if (length(successful_models[[structure]]) == 0) {
-      successful_models[[structure]] <- NULL
+    if (length(successful_models[[model_name]]) == 0) {
+      successful_models[[model_name]] <- NULL
     }
   }
   
@@ -3194,7 +2165,7 @@ extract_constraint_type_from_metadata <- function(metadata) {
   return(NA_character_)
 }
 
-### Helper functions to extract hazard ratios from fitted model ----------
+### Extract HRs from fitted model ----------
 
 # Helper function to check if a covariate term is a spline term
 is_spline_covariate_term <- function(covariate_name, metadata) {
@@ -3299,3 +2270,268 @@ group_hazard_ratios_by_variable <- function(tidied_hrs) {
     ) %>%
     ungroup()
 }
+
+# Comprehensive wrapper for base performance metrics calculation ----
+
+run_comprehensive_msm_analysis <- function(fitted_msm_models, 
+                                           patient_data, 
+                                           crude_rates = NULL,  # Not used anymore but kept for compatibility
+                                           time_vec = seq(1, 30, by = 1),  # ADD THIS
+                                           analysis_config = list(),
+                                           parallel = TRUE,
+                                           mc.cores = NULL,
+                                           verbose = TRUE) {
+  
+  # Validate inputs
+  if (!is.list(fitted_msm_models) || length(fitted_msm_models) == 0) {
+    stop("fitted_msm_models must be a non-empty list")
+  }
+  
+  validate_model_structure(fitted_msm_models)
+  
+  if (!is.data.frame(patient_data)) {
+    stop("patient_data must be a data frame")
+  }
+  
+  # Setup parallel processing
+  if (is.null(mc.cores)) {
+    mc.cores <- min(8, parallel::detectCores() - 1)
+  }
+  
+  # Default configuration
+  default_config <- list(
+    # Model summary parameters
+    tidy_models = list(),
+    
+    # Q-matrix parameters
+    qmatrix = list(
+      covariates_list = NULL,
+      mc.cores = mc.cores
+    ),
+    
+    # P-matrix parameters  
+    pmats = list(
+      t_values = time_vec,
+      covariates_list = NULL,
+      mc.cores = mc.cores
+    ),
+    
+    # Sojourn time parameters
+    sojourns = list(
+      covariates_list = NULL
+    ),
+    
+    # Prevalence parameters
+    prevalence = list(
+      time_points = time_vec,
+      covariates_list = NULL,
+      ci = TRUE,
+      ci_method = "normal",
+      use_approximation = FALSE,
+      mc.cores = mc.cores
+    ),
+    
+    # Hazard ratio parameters
+    hazards = list(
+      hazard_scale = 1
+    ),
+    
+    # Cross-validation parameters
+    cv = list(
+      k_folds = 5,
+      stratify_by = "final_state",
+      prediction_horizon = 365,
+      output_dir = here::here("data", "temp", "cv_results"),
+      parallel = parallel,
+      n_cores = mc.cores
+    ),
+    
+    # Residual analysis parameters
+    residuals = list(
+      residual_type = "deviance",
+      debug = verbose
+    )
+  )
+  
+  # Merge user config with defaults
+  config <- modifyList(default_config, analysis_config)
+  
+  # Initialize results list
+  results <- list(
+    metadata = list(
+      run_time = Sys.time(),
+      n_model_names = length(fitted_msm_models),
+      total_models = sum(sapply(fitted_msm_models, length)),
+      config = config,
+      parallel = parallel,
+      mc.cores = mc.cores
+    )
+  )
+  
+  if (verbose) {
+    cat("=== COMPREHENSIVE MSM ANALYSIS ===\n")
+    cat("Model names:", length(fitted_msm_models), "\n")
+    cat("Total models:", sum(sapply(fitted_msm_models, length)), "\n")
+    cat("Parallel processing:", ifelse(parallel, paste("enabled (", mc.cores, "cores)"), "disabled"), "\n")
+    cat("\n")
+  }
+  
+  # 1. Model Summary
+  if (verbose) cat("1. Tidying model summaries...\n")
+  results$model_summary <- tryCatch({
+    tidy_msm_models(fitted_msm_models)
+  }, error = function(e) {
+    warning(paste("tidy_msm_models failed:", e$message))
+    data.frame()
+  })
+  
+  if (verbose && nrow(results$model_summary) > 0) {
+    converged <- sum(results$model_summary$status == "converged", na.rm = TRUE)
+    cat("   -", converged, "of", nrow(results$model_summary), "models converged\n")
+  }
+  
+  # 2. Transition Intensities (Q-matrix)
+  if (verbose) cat("2. Extracting transition intensities...\n")
+  results$qmatrix <- tryCatch({
+    tidy_msm_qmatrix(fitted_msm_models, 
+                     covariates_list = config$qmatrix$covariates_list,
+                     ci_type = "normal",
+                     mc.cores = config$qmatrix$mc.cores)
+  }, error = function(e) {
+    warning(paste("tidy_msm_qmatrix failed:", e$message))
+    data.frame()
+  })
+  
+  # 3. Transition Probabilities (P-matrix)
+  if (verbose) cat("3. Calculating transition probabilities...\n")
+  results$pmats <- tryCatch({
+    tidy_msm_pmats(fitted_msm_models,
+                   t_values = config$pmats$t_values,
+                   covariates_list = config$pmats$covariates_list,
+                   ci_type = "normal",
+                   mc.cores = config$pmats$mc.cores)
+  }, error = function(e) {
+    warning(paste("tidy_msm_pmats failed:", e$message))
+    data.frame()
+  })
+  
+  # 4. Sojourn Times
+  if (verbose) cat("4. Extracting sojourn times...\n")
+  results$sojourns <- tryCatch({
+    tidy_msm_sojourns(fitted_msm_models, 
+                      covariates_list = config$sojourns$covariates_list)
+  }, error = function(e) {
+    warning(paste("tidy_msm_sojourns failed:", e$message))
+    data.frame()
+  })
+  
+  # 5. State Prevalences (most computationally intensive)
+  if (!isTRUE(config$prevalence$skip)) {
+    if (verbose) cat("5. Computing state prevalences...\n")
+    prevalence_start_time <- Sys.time()
+    results$prevalence <- tryCatch({
+      do.call(tidy_msm_prevalences, c(list(fitted_msm_models), config$prevalence))
+    }, error = function(e) {
+      warning(paste("tidy_msm_prevalences failed:", e$message))
+      data.frame()
+    })
+    prevalence_duration <- Sys.time() - prevalence_start_time
+    if (verbose) cat("   - Completed in", round(as.numeric(prevalence_duration, units = "secs"), 1), "seconds\n")
+  } else {
+    if (verbose) cat("5. Skipping state prevalences (skip = TRUE)\n")
+    results$prevalence <- data.frame()
+  }
+  
+  # 6. Hazard Ratios (only for models with covariates)
+  if (!isTRUE(config$hazards$skip)) {
+    if (verbose) cat("6. Calculating hazard ratios...\n")
+    results$hazards <- tryCatch({
+      tidy_msm_hazards(fitted_msm_models, hazard_scale = config$hazards$hazard_scale)
+    }, error = function(e) {
+      warning(paste("tidy_msm_hazards failed:", e$message))
+      data.frame()
+    })
+  } else {
+    if (verbose) cat("6. Skipping hazard ratios (skip = TRUE)\n")
+    results$hazards <- data.frame()
+  }
+  
+  # 7. Cross-Validation
+  if (!isTRUE(config$cv$skip)) {
+    if (verbose) cat("7. Running cross-validation...\n")
+    cv_start_time <- Sys.time()
+    
+    # cv_msm_models returns a file path to the summary
+    cv_summary_path <- tryCatch({
+      cv_msm_models(
+        fitted_models = fitted_msm_models,
+        patient_data = patient_data,
+        k_folds = config$cv$k_folds,
+        stratify_by = config$cv$stratify_by,
+        prediction_horizon = config$cv$prediction_horizon,
+        output_dir = config$cv$output_dir,
+        parallel = config$cv$parallel,
+        n_cores = config$cv$n_cores,
+        verbose = verbose
+      )
+    }, error = function(e) {
+      warning(paste("cv_msm_models failed:", e$message))
+      NULL
+    })
+    
+    # Load the summary results
+    if (!is.null(cv_summary_path) && file.exists(cv_summary_path)) {
+      results$cv_summary <- readRDS(cv_summary_path)
+      results$cv_output_dir <- config$cv$output_dir
+    } else {
+      results$cv_summary <- data.frame()
+      results$cv_output_dir <- NULL
+    }
+    
+    cv_duration <- Sys.time() - cv_start_time
+    if (verbose) cat("   - Completed in", round(as.numeric(cv_duration, units = "mins"), 1), "minutes\n")
+  } else {
+    if (verbose) cat("7. Skipping cross-validation (skip = TRUE)\n")
+    results$cv_summary <- data.frame()
+    results$cv_output_dir <- NULL
+  }
+  
+  # 8. Transition Residuals
+  if (!isTRUE(config$residuals$skip)) {
+    if (verbose) cat("8. Computing transition residuals...\n")
+    results$residuals <- tryCatch({
+      do.call(calculate_transition_residuals, 
+              c(list(fitted_msm_models = fitted_msm_models,
+                     patient_data = patient_data,
+                     pmats_results = results$pmats),
+                config$residuals))
+    }, error = function(e) {
+      warning(paste("calculate_transition_residuals failed:", e$message))
+      data.frame()
+    })
+  } else {
+    if (verbose) cat("8. Skipping transition residuals (skip = TRUE)\n")
+    results$residuals <- data.frame()
+  }
+  
+  # Final metadata
+  total_duration <- Sys.time() - results$metadata$run_time
+  results$metadata$total_runtime <- total_duration
+  results$metadata$components_completed <- sum(!sapply(results[2:length(results)], function(x) {
+    is.data.frame(x) && nrow(x) == 0 || is.list(x) && length(x) == 0
+  }))
+  
+  if (verbose) {
+    cat("\n=== ANALYSIS COMPLETE ===\n")
+    cat("Total runtime:", round(as.numeric(total_duration, units = "mins"), 1), "minutes\n")
+    cat("Components completed:", results$metadata$components_completed, "of 8\n")
+    cat("Result object size:", format(object.size(results), units = "Mb"), "\n")
+  }
+  
+  # Add helper attributes for easier access
+  class(results) <- c("msm_analysis_results", "list")
+  attr(results, "summary") <- create_analysis_summary(results)
+  
+  return(results)
+}
+
