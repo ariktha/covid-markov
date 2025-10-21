@@ -186,7 +186,7 @@ tidy_msm_models <- function(fitted_msm_models) {
 
 tidy_msm_qmatrix <- function(fitted_msm_models, 
                              covariates_list = NULL,
-                             ci_type = "normal",
+                             ci_method = c("normal", "bootstrap", "none"),
                              mc.cores = min(6, parallel::detectCores() - 1)) {
   
   validate_model_structure(fitted_msm_models)
@@ -220,7 +220,7 @@ tidy_msm_qmatrix <- function(fitted_msm_models,
       model_structure <- metadata$model_structure
       
       model_tidy <- tryCatch({
-        qmat_result <- qmatrix.msm(fitted_model, ci = ci_type, cores = mc.cores)
+        qmat_result <- qmatrix.msm(fitted_model, ci = ci_method, cores = mc.cores)
         
         # Use metadata for covariate info, fallback to formula parsing
         covariate_vars <- extract_covariate_label_from_metadata(metadata, formula_name)
@@ -257,7 +257,7 @@ tidy_msm_qmatrix <- function(fitted_msm_models,
 tidy_msm_pmats <- function(fitted_msm_models, 
                            t_values = c(1, 5, 14, 30), 
                            covariates_list = NULL,
-                           ci_type = "normal",
+                           ci_method = c("normal", "bootstrap", "none"),
                            mc.cores = min(6, parallel::detectCores() - 1)) {
   
   validate_model_structure(fitted_msm_models)
@@ -295,7 +295,7 @@ tidy_msm_pmats <- function(fitted_msm_models,
         # Handle multiple covariate combinations
         if (is.null(covariates_list)) {
           model_tidy <- tryCatch({
-            pmat_result <- pmatrix.msm(fitted_model, t = t_val, ci = ci_type, cores = mc.cores)
+            pmat_result <- pmatrix.msm(fitted_model, t = t_val, ci = ci_method, cores = mc.cores)
             
             # Use tidy() directly and add metadata
             tidy(pmat_result) %>%
@@ -324,7 +324,7 @@ tidy_msm_pmats <- function(fitted_msm_models,
           for (cov_combo in covariates_list) {
             model_tidy <- tryCatch({
               pmat_result <- pmatrix.msm(fitted_model, t = t_val, 
-                                         covariates = cov_combo, ci = ci_type, cores = mc.cores)
+                                         covariates = cov_combo, ci = ci_method, cores = mc.cores)
               
               # Use tidy() directly and add metadata
               tidy(pmat_result) %>%
@@ -360,7 +360,8 @@ tidy_msm_pmats <- function(fitted_msm_models,
 ### Sojourn times -----------------------------------------------------
 
 tidy_msm_sojourns <- function(fitted_msm_models, 
-                              covariates_list = NULL) {
+                              covariates_list = NULL,
+                              ci_method = c("normal", "delta", "bootstrap", "none")) {
   
   validate_model_structure(fitted_msm_models)
   tidied_sojourns <- data.frame()
@@ -394,7 +395,7 @@ tidy_msm_sojourns <- function(fitted_msm_models,
       # Handle multiple covariate combinations
       if (is.null(covariates_list)) {
         model_tidy <- tryCatch({
-          sojourn_result <- sojourn.msm(fitted_model)
+          sojourn_result <- sojourn.msm(fitted_model, ci = ci_method)
           
           states <- rownames(sojourn_result)
           
@@ -424,7 +425,7 @@ tidy_msm_sojourns <- function(fitted_msm_models,
         # Handle covariate combinations
         for (cov_combo in covariates_list) {
           model_tidy <- tryCatch({
-            sojourn_result <- sojourn.msm(fitted_model, covariates = cov_combo)
+            sojourn_result <- sojourn.msm(fitted_model, covariates = cov_combo, ci = ci_method)
             
             # Use tidy() directly and add metadata
             tidy(sojourn_result) %>%
@@ -825,7 +826,7 @@ tidy_msm_prevalences <- function(fitted_msm_models,
         # Store only the essential info, not the full model objects
         model_combinations[[combination_count]] <- list(
           model_name = model_name,
-          model_structure = model_structure, 
+          model_structure = model_entry$metadata$model_structure, 
           formula_name = formula_name,
           index = combination_count
         )
@@ -1168,7 +1169,7 @@ prevalence_to_tib <- function(prevalence_result, fitted_model, has_ci = TRUE) {
 }
 
 
-# Model fit: ------------------------------------------------------------
+# Model fit: Residuals ------------------------------------------------------------
 
 #' Calculate transition residuals using pre-computed transition probabilities
 #' @param fitted_msm_models Nested list of fitted models: fitted_models[[model_structure]][[formula]]
@@ -2306,19 +2307,22 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
     # Q-matrix parameters
     qmatrix = list(
       covariates_list = NULL,
-      mc.cores = mc.cores
+      mc.cores = mc.cores,
+      ci_method = "normal"
     ),
     
     # P-matrix parameters  
     pmats = list(
       t_values = time_vec,
       covariates_list = NULL,
-      mc.cores = mc.cores
+      mc.cores = mc.cores,
+      ci_method = "normal"
     ),
     
     # Sojourn time parameters
     sojourns = list(
-      covariates_list = NULL
+      covariates_list = NULL,
+      ci_method = "normal"
     ),
     
     # Prevalence parameters
@@ -2334,16 +2338,6 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
     # Hazard ratio parameters
     hazards = list(
       hazard_scale = 1
-    ),
-    
-    # Cross-validation parameters
-    cv = list(
-      k_folds = 5,
-      stratify_by = "final_state",
-      prediction_horizon = 365,
-      output_dir = here::here("data", "temp", "cv_results"),
-      parallel = parallel,
-      n_cores = mc.cores
     ),
     
     # Residual analysis parameters
@@ -2395,7 +2389,7 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
   results$qmatrix <- tryCatch({
     tidy_msm_qmatrix(fitted_msm_models, 
                      covariates_list = config$qmatrix$covariates_list,
-                     ci_type = "normal",
+                     ci_method = "normal",
                      mc.cores = config$qmatrix$mc.cores)
   }, error = function(e) {
     warning(paste("tidy_msm_qmatrix failed:", e$message))
@@ -2408,7 +2402,7 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
     tidy_msm_pmats(fitted_msm_models,
                    t_values = config$pmats$t_values,
                    covariates_list = config$pmats$covariates_list,
-                   ci_type = "normal",
+                   ci_method = "normal",
                    mc.cores = config$pmats$mc.cores)
   }, error = function(e) {
     warning(paste("tidy_msm_pmats failed:", e$message))
@@ -2456,49 +2450,9 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
     results$hazards <- data.frame()
   }
   
-  # 7. Cross-Validation
-  if (!isTRUE(config$cv$skip)) {
-    if (verbose) cat("7. Running cross-validation...\n")
-    cv_start_time <- Sys.time()
-    
-    # cv_msm_models returns a file path to the summary
-    cv_summary_path <- tryCatch({
-      cv_msm_models(
-        fitted_models = fitted_msm_models,
-        patient_data = patient_data,
-        k_folds = config$cv$k_folds,
-        stratify_by = config$cv$stratify_by,
-        prediction_horizon = config$cv$prediction_horizon,
-        output_dir = config$cv$output_dir,
-        parallel = config$cv$parallel,
-        n_cores = config$cv$n_cores,
-        verbose = verbose
-      )
-    }, error = function(e) {
-      warning(paste("cv_msm_models failed:", e$message))
-      NULL
-    })
-    
-    # Load the summary results
-    if (!is.null(cv_summary_path) && file.exists(cv_summary_path)) {
-      results$cv_summary <- readRDS(cv_summary_path)
-      results$cv_output_dir <- config$cv$output_dir
-    } else {
-      results$cv_summary <- data.frame()
-      results$cv_output_dir <- NULL
-    }
-    
-    cv_duration <- Sys.time() - cv_start_time
-    if (verbose) cat("   - Completed in", round(as.numeric(cv_duration, units = "mins"), 1), "minutes\n")
-  } else {
-    if (verbose) cat("7. Skipping cross-validation (skip = TRUE)\n")
-    results$cv_summary <- data.frame()
-    results$cv_output_dir <- NULL
-  }
-  
-  # 8. Transition Residuals
+  # 7. Transition Residuals
   if (!isTRUE(config$residuals$skip)) {
-    if (verbose) cat("8. Computing transition residuals...\n")
+    if (verbose) cat("7. Computing transition residuals...\n")
     results$residuals <- tryCatch({
       do.call(calculate_transition_residuals, 
               c(list(fitted_msm_models = fitted_msm_models,
@@ -2510,7 +2464,7 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
       data.frame()
     })
   } else {
-    if (verbose) cat("8. Skipping transition residuals (skip = TRUE)\n")
+    if (verbose) cat("7. Skipping transition residuals (skip = TRUE)\n")
     results$residuals <- data.frame()
   }
   
@@ -2524,13 +2478,9 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
   if (verbose) {
     cat("\n=== ANALYSIS COMPLETE ===\n")
     cat("Total runtime:", round(as.numeric(total_duration, units = "mins"), 1), "minutes\n")
-    cat("Components completed:", results$metadata$components_completed, "of 8\n")
+    cat("Components completed:", results$metadata$components_completed, "of 7\n")
     cat("Result object size:", format(object.size(results), units = "Mb"), "\n")
   }
-  
-  # Add helper attributes for easier access
-  class(results) <- c("msm_analysis_results", "list")
-  attr(results, "summary") <- create_analysis_summary(results)
   
   return(results)
 }

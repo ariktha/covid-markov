@@ -131,3 +131,27 @@ trend_colors <- c(
   "Self-transition" = "goldenrod",
   "Other" = "gray50"
 )
+
+
+stage_order <- c("4", "5", "6", "7", "8", "9", "10", "11")
+state_order <- c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2", "D", "R")
+
+models <- c(
+  "base_model" = "Base model",
+  "reduced_trans" = "Simplified transitions",
+  "hx_sev" = "History of severe",
+  "mod_2" = "2 moderate states",
+  "mod_3" = "3 moderate states",
+  "sev_2" = "2 severe states"
+)
+
+# model_colors <- c(
+#   "black",
+#   
+# )
+
+models_df <- tibble(
+  model = names(models),
+  model_name = models
+)
+

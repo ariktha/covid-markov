@@ -1,0 +1,362 @@
+---
+title: "Manuscript figures and tables"
+date: today
+format:
+  html:
+    df-print: paged
+    toc: true
+    toc-float: true
+    toc-depth: 3
+    code-fold: true
+    theme: default
+    embed-resources: true
+editor: source
+editor_options: 
+  markdown: 
+    wrap: 72
+execute:
+  cache: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = TRUE) 
+
+rm(list = ls())
+
+library(here)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(tableone)
+library(Hmisc)
+library(ggpubr)
+library(reactable)
+library(patchwork)
+library(viridis)
+
+```
+
+```{r}
+#| label: load-data
+#| include: false
+
+source(here("R", "00-config.R"))
+source(here("R", "00-functions-tbl_figs.R"))
+
+pt_stg <- readRDS(here("data", "temp", "pt_stg.rds"))
+```
+
+```{r}
+#| label: setup parameters for plots
+
+stage_order <- c("4", "5", "6", "7", "8", "9", "10", "11")
+state_order <- c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2", "D", "R")
+
+models <- c(
+  "base_model" = "Base model",
+  "hx_sev" = "State for history of severe",
+  "mod_2" = "2 moderate states",
+  "mod_3" = "3 moderate states",
+  "sev_2" = "2 severe states",
+  "reduced_trans" = "Simplified transitions"
+)
+
+models_df <- tibble(
+  model = names(models),
+  model_name = models
+)
+
+```
+
+# "Table 1"
+
+```{r}
+#| label: table-one-data
+#| echo: true
+
+tab_one_dat <- pt_stg %>%
+  dplyr::filter(model == "base_model", state %in% c("M", "S")) %>%
+  group_by(deid_enc_id) %>%
+  mutate(ever_dnr = ifelse(any(DNR == 1), 1, 0)) %>%
+  ungroup() %>%
+  distinct() %>%
+  mutate(copd = ifelse(copd == 1, TRUE, FALSE),
+         absorbing_state = ifelse(end_in_death == "Yes", "Death", "Recovery")) %>%
+  mutate(across(c(copd, COVID_vax, stage, state), as.factor))
+
+cov_tx_days <- tab_one_dat %>%
+  mutate(cov_tx = ifelse(!is.na(COVID_tx_name), 1, 0)) %>%
+  group_by(deid_enc_id) %>%
+  dplyr::summarize(tx_days = sum(cov_tx, na.rm = TRUE), .groups = "drop")
+
+stg_days_enc <- tab_one_dat %>%
+  group_by(deid_enc_id, stage, state) %>%
+  dplyr::summarize(days_in_stage = n(), .groups = "drop") %>%
+  dplyr::filter(state %in% c("M", "S"))
+
+entry_stage <- tab_one_dat %>%
+  group_by(deid_enc_id) %>%
+  dplyr::filter(DaysSinceEntry == 0) %>%
+  dplyr::select(deid_enc_id, state) %>%
+  rename(entry_state = state)
+
+n_pat_enc <- tab_one_dat %>%
+  dplyr::select(deid_pat_id, deid_enc_id) %>%
+  distinct() %>%
+  group_by(deid_pat_id) %>%
+  dplyr::summarize(n_enc = n())
+
+```
+
+```{r}
+#| label: table-one-pars
+#| echo: true
+
+demographics <- c(
+  "age" = "Age (years)",
+  "sex" = "Sex", 
+  "race" = "Race",
+  "ethnicity" = "Ethnicity",
+  "language" = "Preferred Language",
+  "insurance_type" = "Insurance Type"
+)
+
+clinical_risk <- c(
+  "smoking" = "Smoking Status",
+  "BMI" = "BMI",
+  "bmi_cat" = "BMI Category", 
+  "cci_score" = "CCI (Score)",
+  "cci_cat" = "CCI (Category)",
+  "chf" = "CHF",
+  "copd" = "COPD",
+  "COVID_vax" = "COVID Vaccination",
+  "ever_dnr" = "Ever DNR during Encounter",
+  "dnr_on_admit" = "DNR on Admission"
+)
+
+encounter_chars <- c(
+  "entry_state" = "Entry State",
+  "cov_diag_medium" = "COVID Diagnosis (Medium)",
+  "cov_diag_strict" = "COVID Diagnosis (Strict)", 
+  # "tx_days" = "Days with COVID Treatment",
+  "stage" = "Days in WHO Stage",
+  "state" = "Days in State",
+  "LOS" = "Length of Stay (days)",
+  "absorbing_state" = "Absorbing State"
+)
+
+
+```
+
+## Supplementary table 1: Patient characteristics
+
+```{r}
+#| label: supp-tab-one
+#| echo: true
+
+tab_one_pat_var_labels <- c(demographics, clinical_risk)
+tab_one_pat_vars <- names(tab_one_pat_var_labels)
+
+tab_one_pat_dat <- tab_one_dat %>%
+  dplyr::select(deid_pat_id, all_of(tab_one_pat_vars)) %>%
+  distinct() %>%
+  left_join(n_pat_enc, by = "deid_pat_id")
+
+
+tab_one_pat <- CreateTableOne(vars = tab_one_pat_vars, data = tab_one_pat_dat)
+
+tab_one_pat_mat <- print(tab_one_pat, printToggle = FALSE, varLabels = TRUE, 
+                 pDigits = 3, formatOptions = list(big.mark = ","),
+                 missing = TRUE)
+
+# Find rows that start with spaces and wrap them in span with CSS
+row_names <- rownames(tab_one_pat_mat)
+category_rows <- which(grepl("^   ", row_names))
+for(i in category_rows) {
+  rownames(tab_one_pat_mat)[i] <- paste0('<span style="padding-left: 2em;">', 
+                                      trimws(rownames(tab_one_pat_mat)[i]), 
+                                      '</span>')
+}
+
+kable(tab_one_pat_mat, format = "html", escape = FALSE) %>%
+  kable_styling() %>%
+  pack_rows("Demographics", 2, 22,
+            indent = TRUE, label_row_css = "font-weight: bold") %>%
+  pack_rows("Clinical Risk Factors", 23, 30,
+            indent = TRUE, label_row_css = "font-weight: bold")
+
+kable(n_pat_enc %>% count(n_enc), 
+      col.names = c("Encounters per patient", "Number of patients")) %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+## Table 1: Encounter characteristics
+
+```{r}
+#| label: table-one-encounters
+#| echo: true
+
+tab_one_enc_var_labels <- c(encounter_chars)
+tab_one_enc_vars <- names(tab_one_enc_var_labels)
+
+for(var in tab_one_enc_vars) {
+  if(var %in% names(tab_one_dat)) {
+    label(tab_one_dat[[var]]) <- tab_one_enc_var_labels[[var]]
+  }
+}
+
+tab_one_enc_dat <- tab_one_dat %>%
+  dplyr::select(deid_enc_id, any_of(tab_one_enc_vars)) %>%
+  distinct() %>%
+  dplyr::select(-state, -stage) %>%
+  left_join(cov_tx_days, by = "deid_enc_id") %>%
+  left_join(entry_stage, by = "deid_enc_id") %>%
+  left_join(stg_days_enc, by = "deid_enc_id", relationship = "many-to-many")
+
+enc_tab_one_ent <- CreateTableOne(vars = tab_one_enc_vars, 
+                              data = tab_one_enc_dat, 
+                              strata = c("entry_state"),
+                              addOverall = TRUE
+                              )
+
+enc_tab_one_abs <- CreateTableOne(vars = tab_one_enc_vars, 
+                              data = tab_one_enc_dat, 
+                              strata = c("absorbing_state"),
+                              addOverall = FALSE
+                              )
+
+mat_ent <- print(enc_tab_one_ent, printToggle = FALSE, varLabels = TRUE, 
+                 pDigits = 3, formatOptions = list(big.mark = ","),
+                 missing = TRUE)
+mat_abs <- print(enc_tab_one_abs, printToggle = FALSE, varLabels = TRUE, 
+                 pDigits = 3, formatOptions = list(big.mark = ","),
+                 missing = TRUE)
+
+mat_ent_clean <- mat_ent[, c("Overall", "M", "S", "p")]
+mat_abs_clean <- mat_abs[, c("Death", "Recovery", "p")]
+
+colnames(mat_ent_clean)[4] <- "p_entry"
+colnames(mat_abs_clean)[3] <- "p_absorbing"
+
+combined_mat <- cbind(mat_ent_clean, mat_abs_clean)
+
+modified_mat <- combined_mat
+row_names <- rownames(modified_mat)
+
+p_cols <- grep("p_", colnames(modified_mat))
+for(col in p_cols) {
+  modified_mat[, col] <- gsub("<", "&lt;", modified_mat[, col])
+  modified_mat[, col] <- gsub(">", "&gt;", modified_mat[, col])
+}
+
+# Find rows that start with spaces and wrap them in span with CSS
+category_rows <- which(grepl("^   ", row_names))
+for(i in category_rows) {
+  rownames(modified_mat)[i] <- paste0('<span style="padding-left: 2em;">', 
+                                      trimws(rownames(modified_mat)[i]), 
+                                      '</span>')
+}
+
+kableone(modified_mat, format = "html", escape = FALSE) %>%
+  kable_styling() %>%
+  add_header_above(c(" " = 1, "Overall" = 1, 
+                     "Entry State" = ncol(mat_ent_clean) - 1, 
+                     "Absorbing State" = ncol(mat_abs_clean)))
+
+```
+
+# Fig 1: State-space diagrams
+
+![State space diagram](images/state-space.png)
+
+# Timeline
+
+```{r}
+#| label: timeline-data
+#| echo: true
+
+timeline_hosp_data <- pt_stg %>%
+  dplyr::select(model, deid_enc_id, DaysSinceEntry, DaysSincePos, stage, state) %>%
+  filter(model == "base_model") %>%
+  mutate(state_type = ifelse(grepl("M", state), "Moderate", "Severe")) %>%
+  group_by(deid_enc_id) %>%
+  mutate(LOS = n(),
+         n_severe = sum(ifelse(state_type == "Severe", 1, 0))) %>%
+  ungroup() %>%
+  arrange(desc(LOS), desc(n_severe)) %>%
+  mutate(deid_enc_id = factor(deid_enc_id, levels = unique(deid_enc_id)))
+
+
+timeline_cal_data <- pt_stg %>%
+  dplyr::select(model, deid_enc_id, date, CalendarTime, stage, state) %>%
+  filter(model == "base_model") %>%
+  mutate(state_type = ifelse(grepl("M", state), "Moderate", "Severe")) %>%
+  arrange(date) %>%
+  mutate(deid_enc_id = factor(deid_enc_id, levels = unique(deid_enc_id)))
+
+```
+
+## Supp fig 1: Timelines
+
+```{r}
+
+timeline_pA <- ggplot(data = timeline_hosp_data,
+       aes(x = DaysSinceEntry, y = deid_enc_id, color = state, fill = state)) +
+  geom_tile(aes(width = 1, height = 0.8)) +
+  theme_minimal() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid = element_blank(),
+        legend.position = "bottom") +
+  scale_color_viridis_d() +
+  scale_fill_viridis_d() +
+  scale_x_continuous(name = "Days since hospital admission", 
+                     breaks = seq(0, 60, by = 5),
+                     limits = c(0, 30))
+
+# timeline_pA
+
+timeline_pB <- ggplot(data = timeline_hosp_data,
+       aes(x = DaysSincePos, y = deid_enc_id, color = state, fill = state)) +
+  geom_tile(aes(width = 1, height = 0.8)) +
+  theme_minimal() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid = element_blank(),
+        legend.position = "bottom") +
+  scale_color_viridis_d() +
+  scale_fill_viridis_d() +
+  scale_x_continuous(name = "Days since positive COVID test", 
+                     breaks = seq(-10, 60, by = 5),
+                     limits = c(NA, 30))
+
+# timeline_pB
+
+timeline_pC <- ggplot(data = timeline_cal_data,
+       aes(x = date, y = deid_enc_id, color = state, fill = state)) +
+  geom_tile(aes(width = 1, height = 1.5)) +
+  theme_minimal() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid = element_blank(),
+        legend.position = "bottom") +
+  scale_color_viridis_d() +
+  scale_fill_viridis_d() +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "3 months")
+
+# timeline_pC
+
+(timeline_pA + timeline_pB) / timeline_pC + 
+  plot_annotation(tag_levels = 'A') + 
+  plot_layout(guides = 'collect', heights = c(1, 1)) & 
+  theme(legend.position = 'bottom')
+
+```

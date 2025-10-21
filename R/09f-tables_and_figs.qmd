@@ -42,12 +42,14 @@ library(viridis)
 #| include: false
 
 source(here("R", "00-config.R"))
-source(here("R", "00-functions-tbl_figs.R"))
+source(here("R", "00x-fns-tbl_figs.R"))
 
 pt_stg <- readRDS(here("data", "temp", "pt_stg.rds"))
 
-# fitted_base_models <- readRDS(here("data", "temp", "fitted_base_models.rds"))
-base_models_comp <- readRDS(here("data", "temp", "base_models_comp.rds"))
+# base_models <- readRDS(here("data", "base_models.rds"))
+base_comp <- readRDS(here("data", "base_comp.rds"))
+base_cv <- readRDS(here("data", "cv_results", "base", "cv_summary_all_models.rds"))
+base_cv_metadata <- readRDS(here("data", "cv_results", "base", "cv_metadata.rds"))
 
 # Markov assumption
 # fitted_models_for_markov <- readRDS(here("data", "temp", "markov_comparison_models.rds"))
@@ -226,9 +228,9 @@ for(i in category_rows) {
 
 kable(tab_one_pat_mat, format = "html", escape = FALSE) %>%
   kable_styling() %>%
-  pack_rows("Demographics", 2, 16,
+  pack_rows("Demographics", 2, 22,
             indent = TRUE, label_row_css = "font-weight: bold") %>%
-  pack_rows("Clinical Risk Factors", 17, 30,
+  pack_rows("Clinical Risk Factors", 23, 30,
             indent = TRUE, label_row_css = "font-weight: bold")
 
 kable(n_pat_enc %>% count(n_enc), 
@@ -294,9 +296,9 @@ kableone(modified_mat, format = "html", escape = FALSE) %>%
                      "Absorbing State" = ncol(mat_abs_clean))) %>%
   pack_rows("Demographics", 2, 22,
             indent = TRUE, label_row_css = "font-weight: bold") %>%
-  pack_rows("Clinical Risk Factors", 23, 41,
+  pack_rows("Clinical Risk Factors", 23, 46,
             indent = TRUE, label_row_css = "font-weight: bold") %>%
-  pack_rows("Encounter Characteristics", 42, 57,
+  pack_rows("Encounter Characteristics", 47, 57,
             indent = TRUE, label_row_css = "font-weight: bold")
 
 ```
