@@ -55,21 +55,18 @@ calc_crude_init_rates <- function(patient_data, qmat_list) {
 
 fit_msm_models <- function(patient_data, 
                            crude_rates, 
+                           model_specs,
                            
-                           # Covariate specifications
+                           # Default specifications (used when columns missing from model_specs)
                            covariates = NULL,
                            spline_vars = NULL,
                            spline_df = 3,
                            spline_type = "ns",
-                           
-                           # Time-varying specifications
-                           time_varying = NULL,  # "linear", "spline", "piecewise", "quadratic"
-                           time_variable = "DaysSinceEntry", # or "CalendarTime"
+                           time_varying = NULL,
+                           time_variable = "DaysSinceEntry",
                            time_breakpoints = NULL,
                            time_spline_df = 3,
-                           
-                           # Constraint options - transition-specific is default
-                           constraint = "transition_specific", # "constant_across_transitions"
+                           constraint = "transition_specific",
                            
                            # Processing options
                            mc.cores = min(8, parallel::detectCores() - 1)) {
@@ -81,131 +78,1086 @@ fit_msm_models <- function(patient_data,
   if (!requireNamespace("splines", quietly = TRUE)) {
     stop("splines package is required for spline functionality")  
   }
+  if (!requireNamespace("dplyr", quietly = TRUE)) {
+    stop("dplyr package is required")
+  }
   
-  # Validate that model structures in crude_rates exist in patient_data
+  # Validate model_specs
+  if (!is.data.frame(model_specs)) {
+    stop("model_specs must be a data frame or tibble")
+  }
+  
+  required_cols <- c("model_name", "model_structure")
+  missing_cols <- setdiff(required_cols, names(model_specs))
+  if (length(missing_cols) > 0) {
+    stop(paste("model_specs missing required columns:", paste(missing_cols, collapse = ", ")))
+  }
+  
+  # Check for unique model_name
+  if (any(duplicated(model_specs$model_name))) {
+    stop("model_name must be unique in model_specs")
+  }
+  
+  # Validate that all model_structure values exist in crude_rates and patient_data
   available_models <- unique(patient_data$model)
-  requested_models <- names(crude_rates)
+  requested_models <- unique(model_specs$model_structure)
+  crude_models <- names(crude_rates)
   
   missing_in_data <- setdiff(requested_models, available_models)
-  missing_crude_rates <- setdiff(available_models, requested_models)
+  missing_in_crude <- setdiff(requested_models, crude_models)
   
   if (length(missing_in_data) > 0) {
-    warning(paste("Crude rates provided for models not in patient_data:", 
-                  paste(missing_in_data, collapse = ", "), "- skipping these"))
+    stop(paste("model_structure values not found in patient_data$model:", 
+               paste(missing_in_data, collapse = ", ")))
   }
   
-  if (length(missing_crude_rates) > 0) {
-    warning(paste("Models in patient_data missing crude rates:", 
-                  paste(missing_crude_rates, collapse = ", "), "- skipping these"))
+  if (length(missing_in_crude) > 0) {
+    stop(paste("model_structure values not found in crude_rates:", 
+               paste(missing_in_crude, collapse = ", ")))
   }
   
-  # Use only models that have BOTH data and crude rates
-  model_names <- intersect(available_models, requested_models)
-  
-  if (length(model_names) == 0) {
-    stop("No valid models found - check that model names match between patient_data$model and names(crude_rates)")
-  }
-  
-  # Preprocess data for time-varying models
-  processed_data_list <- preprocess_time_varying_data(patient_data, time_varying, time_variable, time_breakpoints)
-  
-  # Build unified covariate and spline specifications
-  spec_result <- build_model_specifications(
-    covariates, spline_vars, spline_df, spline_type,
-    time_varying, time_variable, time_spline_df,
-    processed_data_list
+  # Add defaults for missing columns
+  default_cols <- list(
+    covariates = covariates,
+    spline_vars = spline_vars,
+    spline_df = spline_df,
+    spline_type = spline_type,
+    time_varying = time_varying,
+    time_variable = time_variable,
+    time_breakpoints = time_breakpoints,
+    time_spline_df = time_spline_df,
+    constraint = constraint
   )
-
-  model_specs <- spec_result$specs
-  processed_data_list <- spec_result$processed_data_list
   
-  # Define function to fit models for a single model structure
-  fit_single_model_structure <- function(modelname) {
+  for (col_name in names(default_cols)) {
+    if (!col_name %in% names(model_specs)) {
+      model_specs[[col_name]] <- default_cols[[col_name]]
+    }
+  }
+  
+  cat("Fitting", nrow(model_specs), "model specifications\n")
+  
+  # Define function to fit a single row from model_specs
+  fit_single_spec <- function(spec_row_idx) {
     # Ensure required packages in worker
     if (!require("msm", quietly = TRUE)) return(list(error = "msm package not available"))
     if (!require("splines", quietly = TRUE)) return(list(error = "splines package not available"))
     
-    model_data <- processed_data_list[[modelname]]
-    if (is.null(model_data)) {
-      warning(paste("No processed data for model", modelname))
-      return(NULL)
+    spec_row <- model_specs[spec_row_idx, ]
+    model_name <- spec_row$model_name
+    model_structure <- spec_row$model_structure
+    
+    start_time <- Sys.time()
+    
+    # Extract spec parameters (handling list columns)
+    spec_covariates <- if (is.list(spec_row$covariates)) spec_row$covariates[[1]] else spec_row$covariates
+    spec_spline_vars <- if (is.list(spec_row$spline_vars)) spec_row$spline_vars[[1]] else spec_row$spline_vars
+    spec_spline_df <- spec_row$spline_df
+    spec_spline_type <- spec_row$spline_type
+    spec_time_varying <- spec_row$time_varying
+    spec_time_variable <- spec_row$time_variable
+    spec_time_breakpoints <- if (is.list(spec_row$time_breakpoints)) spec_row$time_breakpoints[[1]] else spec_row$time_breakpoints
+    spec_time_spline_df <- spec_row$time_spline_df
+    spec_constraint <- spec_row$constraint
+    
+    # Handle NA values (convert to NULL for our purposes)
+    if (length(spec_time_varying) == 1 && is.na(spec_time_varying)) spec_time_varying <- NULL
+    
+    # Get model data
+    model_data <- patient_data[patient_data$model == model_structure, ]
+    
+    if (nrow(model_data) == 0) {
+      return(list(
+        model_name = model_name,
+        result = NULL,
+        error = paste("No data found for model_structure:", model_structure),
+        runtime = 0
+      ))
     }
     
-    crude_result <- crude_rates[[modelname]]
+    # Get crude rates
+    crude_result <- crude_rates[[model_structure]]
     if (is.null(crude_result)) {
-      warning(paste("Crude rates missing for", modelname))
-      return(NULL)
+      return(list(
+        model_name = model_name,
+        result = NULL,
+        error = paste("Crude rates missing for model_structure:", model_structure),
+        runtime = 0
+      ))
     }
     
+    # Preprocess data for time-varying models
+    processed_data <- preprocess_time_varying_data(
+      model_data, 
+      spec_time_varying, 
+      spec_time_variable, 
+      spec_time_breakpoints
+    )[[model_structure]]
+    
+    # Build model specifications
+    spec_result <- build_model_specifications(
+      spec_covariates, spec_spline_vars, spec_spline_df, spec_spline_type,
+      spec_time_varying, spec_time_variable, spec_time_spline_df,
+      setNames(list(processed_data), model_structure)
+    )
+    
+    model_spec <- spec_result$specs[["main"]]
+    processed_data <- spec_result$processed_data_list[[model_structure]]
+    
+    # Create formula
+    formula_name <- create_formula_name(model_spec$final_covariates)
+    covariate_formula <- if (length(model_spec$final_covariates) > 0) {
+      as.formula(formula_name)
+    } else {
+      NULL
+    }
+    
+    # Handle constraints
     qmat <- crude_result$qmat
     n_transitions <- sum(qmat != 0 & row(qmat) != col(qmat))
     
-    model_results <- list()
+    constraint_for_msm <- create_constraint_specification(
+      model_spec$final_covariates, spec_constraint, n_transitions, processed_data
+    )
     
-    # Loop through each model specification
-    for (spec_name in names(model_specs)) {
-      spec <- model_specs[[spec_name]]
-      
-      # Create formula
-      formula_name <- create_formula_name(spec$final_covariates)
-      covariate_formula <- if (length(spec$final_covariates) > 0) {
-        as.formula(formula_name)
-      } else {
-        NULL
-      }
-      
-      # Handle constraints
-      constraint_for_msm <- create_constraint_specification(
-        spec$final_covariates, constraint, n_transitions, model_data
+    # Try multiple optimization methods
+    fitted_model <- try_multiple_optimizations(
+      processed_data, crude_result, covariate_formula, constraint_for_msm
+    )
+    
+    # Create comprehensive metadata
+    metadata <- create_model_metadata(
+      model_spec, spec_covariates, spec_spline_vars, spec_spline_df, spec_spline_type,
+      spec_time_varying, spec_time_variable, spec_time_breakpoints, spec_time_spline_df,
+      spec_constraint, fitted_model
+    )
+    
+    # Add model_structure to metadata
+    metadata$model_structure <- model_structure
+    
+    # Store result
+    result <- if (!is.null(fitted_model$model)) {
+      list(
+        fitted_model = fitted_model$model,
+        status = "converged",
+        optimization_method = fitted_model$method,
+        metadata = metadata,
+        crude_rates = crude_result,
+        error_message = NULL
       )
-      
-      # Try multiple optimization methods
-      fitted_model <- try_multiple_optimizations(
-        model_data, crude_result, covariate_formula, constraint_for_msm
+    } else {
+      list(
+        fitted_model = NULL,
+        status = "failed",
+        optimization_method = fitted_model$method,
+        metadata = metadata,
+        crude_rates = crude_result,
+        error_message = fitted_model$error
       )
-      
-      # Create comprehensive metadata
-      metadata <- create_model_metadata(
-        spec, covariates, spline_vars, spline_df, spline_type,
-        time_varying, time_variable, time_breakpoints, time_spline_df,
-        constraint, fitted_model
-      )
-      
-      # Store result
-      if (!is.null(fitted_model$model)) {
-        model_results[[formula_name]] <- list(
-          fitted_model = fitted_model$model,
-          status = "converged",
-          optimization_method = fitted_model$method,
-          metadata = metadata,
-          error_message = NULL
-        )
-      } else {
-        model_results[[formula_name]] <- list(
-          fitted_model = NULL,
-          status = "failed",
-          optimization_method = fitted_model$method,
-          metadata = metadata,
-          error_message = fitted_model$error
-        )
-      }
     }
     
-    return(model_results)
+    end_time <- Sys.time()
+    runtime <- as.numeric(difftime(end_time, start_time, units = "secs"))
+    
+    return(list(
+      model_name = model_name,
+      formula_name = formula_name,
+      result = result,
+      error = NULL,
+      runtime = runtime
+    ))
   }
   
-  # Parallelize across model structures
-  fitted_models_list <- parallel::mclapply(
-    model_names,
-    fit_single_model_structure,
+  # Parallelize across rows of model_specs
+  fitted_results <- parallel::mclapply(
+    seq_len(nrow(model_specs)),
+    fit_single_spec,
     mc.cores = mc.cores
   )
   
-  # Convert to named list and remove NULL entries
-  fitted_msm_models <- setNames(fitted_models_list, model_names)
-  fitted_msm_models <- fitted_msm_models[!sapply(fitted_msm_models, is.null)]
+  # Reorganize into nested structure: fitted_models[[model_name]][[formula_name]]
+  fitted_msm_models <- list()
+  runtimes <- list()
+  
+  for (result in fitted_results) {
+    if (is.null(result$error)) {
+      model_name <- result$model_name
+      formula_name <- result$formula_name
+      
+      if (!model_name %in% names(fitted_msm_models)) {
+        fitted_msm_models[[model_name]] <- list()
+      }
+      
+      fitted_msm_models[[model_name]][[formula_name]] <- result$result
+      runtimes[[model_name]] <- result$runtime
+    } else {
+      warning(paste("Error fitting", result$model_name, ":", result$error))
+    }
+  }
+  
+  # Print runtimes
+  cat("\n=== Model Fitting Runtimes ===\n")
+  for (model_name in names(runtimes)) {
+    runtime_mins <- round(runtimes[[model_name]] / 60, 2)
+    runtime_secs <- round(runtimes[[model_name]], 1)
+    
+    if (runtime_mins >= 1) {
+      cat(sprintf("%s: %.2f minutes\n", model_name, runtime_mins))
+    } else {
+      cat(sprintf("%s: %.1f seconds\n", model_name, runtime_secs))
+    }
+  }
   
   return(fitted_msm_models)
+}
+
+## Univariate models with progressive timeouts -----------------------------
+
+# Helper function to build model_specs tibble for univariate analysis
+build_univariate_model_specs <- function(covariate_specs, model_structures, 
+                                         spline_df = 3, spline_type = "ns",
+                                         time_varying = NULL, time_variable = "DaysSinceEntry",
+                                         time_breakpoints = NULL, time_spline_df = 3,
+                                         constraint = "transition_specific") {
+  
+  # Build combinations of covariate specs and model structures
+  combinations <- expand.grid(
+    model_structure = model_structures,
+    spec_name = names(covariate_specs),
+    stringsAsFactors = FALSE
+  )
+  
+  # Build model_specs tibble
+  model_specs <- tibble(
+    model_name = paste(combinations$model_structure, combinations$spec_name, sep = "_"),
+    model_structure = combinations$model_structure,
+    covariates = list(NULL),
+    spline_vars = list(NULL),
+    spline_df = spline_df,
+    spline_type = spline_type,
+    time_varying = if(is.null(time_varying)) NA_character_ else time_varying,
+    time_variable = time_variable,
+    time_breakpoints = list(time_breakpoints),
+    time_spline_df = time_spline_df,
+    constraint = constraint
+  )
+  
+  # Fill in covariates and spline_vars based on spec type
+  # Pre-allocate lists of the correct length
+  covariates_list <- vector("list", nrow(model_specs))
+  spline_vars_list <- vector("list", nrow(model_specs))
+  
+  for (i in seq_len(nrow(model_specs))) {
+    spec_name <- combinations$spec_name[i]
+    spec <- covariate_specs[[spec_name]]
+    
+    if (spec$type == "linear") {
+      covariates_list[[i]] <- spec$variable
+      spline_vars_list[[i]] <- NA
+    } else if (spec$type == "spline") {
+      covariates_list[[i]] <- NA
+      spline_vars_list[[i]] <- spec$variable
+    }
+  }
+  
+  # Assign the complete lists
+  model_specs$covariates <- covariates_list
+  model_specs$spline_vars <- spline_vars_list
+  
+  for (i in seq_len(nrow(model_specs))) {
+    # Handle covariates
+    if (length(model_specs$covariates[[i]]) == 1 && is.na(model_specs$covariates[[i]])) {
+      model_specs$covariates[[i]] <- as.character(NULL)
+    }
+    
+    # Handle spline_vars
+    if (length(model_specs$spline_vars[[i]]) == 1 && is.na(model_specs$spline_vars[[i]])) {
+      model_specs$spline_vars[[i]] <- as.character(NULL)
+    }
+  }
+  
+  return(model_specs)
+}
+
+univariate_progressive_timeout <- function(patient_data, 
+                                           crude_rates, 
+                                           covariates, 
+                                           n.cores,
+                                           # Model structure specification
+                                           model_structures = NULL,  # NEW: specify which to use
+                                           # New parameters with sensible defaults
+                                           spline_vars = NULL,
+                                           spline_df = 3,
+                                           spline_type = "ns",
+                                           time_varying = NULL,
+                                           time_variable = "DaysSinceEntry",
+                                           time_breakpoints = NULL,
+                                           time_spline_df = 3,
+                                           constraint = "transition_specific",
+                                           # Timeout parameters
+                                           timeout_vector = c(5, 15, 30, 60), 
+                                           save_prefix = "msm_univar_progress") {
+  
+  # Determine which model structures to use
+  if (is.null(model_structures)) {
+    model_structures <- names(crude_rates)
+    cat("Using all available model structures:", paste(model_structures, collapse = ", "), "\n")
+  } else {
+    # Validate specified model structures
+    missing_structures <- setdiff(model_structures, names(crude_rates))
+    if (length(missing_structures) > 0) {
+      stop("Specified model_structures not found in crude_rates: ", 
+           paste(missing_structures, collapse = ", "))
+    }
+    cat("Using specified model structures:", paste(model_structures, collapse = ", "), "\n")
+  }
+  
+  # Build list of all covariate specifications to test
+  covariate_specs <- build_univariate_specs(covariates, spline_vars)
+  
+  # Build model_specs tibble for new fit_msm_models interface
+  all_model_specs <- build_univariate_model_specs(
+    covariate_specs, model_structures, spline_df, spline_type,
+    time_varying, time_variable, time_breakpoints, time_spline_df, constraint
+  )
+  
+  # Initialize tracking
+  remaining_model_specs <- all_model_specs
+  
+  # Initialize results structure
+  final_results <- list()
+  
+  # Track failures with enhanced information
+  failed_models <- data.frame(
+    model_name = character(),
+    model_structure = character(),
+    spec_name = character(),
+    covariate = character(),
+    model_type = character(),
+    timeout_minutes = numeric(),
+    status = character(),
+    error_message = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  cat("Starting progressive timeout analysis\n")
+  cat("Timeout sequence:", paste(timeout_vector, "mins", collapse = " -> "), "\n")
+  cat("Total model combinations:", nrow(all_model_specs), "\n")
+  cat("  Linear models:", sum(sapply(covariate_specs, function(x) x$type == "linear")) * length(model_structures), "\n")
+  cat("  Spline models:", sum(sapply(covariate_specs, function(x) x$type == "spline")) * length(model_structures), "\n\n")
+  
+  # Process each timeout level
+  for (timeout_idx in seq_along(timeout_vector)) {
+    current_timeout <- timeout_vector[timeout_idx]
+    
+    if (nrow(remaining_model_specs) == 0) {
+      cat("All combinations completed! Stopping early.\n")
+      break
+    }
+    
+    cat("=== TIMEOUT ROUND", timeout_idx, "===\n")
+    cat("Current timeout:", current_timeout, "minutes\n")
+    cat("Model specs to attempt:", nrow(remaining_model_specs), "\n\n")
+    
+    # Track round start time
+    round_start_time <- Sys.time()
+    
+    # Track what times out in this round
+    this_round_timeouts <- tibble()
+    
+    # Track successes for this round
+    this_round_successes <- 0
+    this_round_errors <- 0
+    
+    # Process remaining model specs in batches or individually
+    for (i in seq_len(nrow(remaining_model_specs))) {
+      current_spec <- remaining_model_specs[i, ]
+      model_name <- current_spec$model_name
+      model_structure <- current_spec$model_structure
+      
+      # Extract covariate info for display
+      covs <- current_spec$covariates[[1]]
+      splines <- current_spec$spline_vars[[1]]
+      
+      if (!is.null(covs) && length(covs) > 0) {
+        display_var <- paste(covs, collapse = "+")
+        model_type <- "linear"
+      } else if (!is.null(splines) && length(splines) > 0) {
+        display_var <- paste(splines, collapse = "+")
+        model_type <- "spline"
+      } else {
+        display_var <- "intercept_only"
+        model_type <- "intercept"
+      }
+      
+      cat(sprintf("  [%d/%d] %s: %s (%s, timeout: %d mins)...", 
+                  i, nrow(remaining_model_specs), model_structure,
+                  display_var, model_type, current_timeout))
+      
+      # Record start time
+      start_time <- Sys.time()
+      
+      # Try to run with current timeout using single-row model_specs
+      model_result <- tryCatch({
+        withTimeout({
+          fit_msm_models(
+            patient_data = patient_data,
+            crude_rates = crude_rates,
+            model_specs = current_spec,
+            mc.cores = n.cores
+          )
+        }, timeout = current_timeout * 60)
+        
+      }, TimeoutException = function(e) {
+        # Add to timeout list for next round (if there is one)
+        if (timeout_idx < length(timeout_vector)) {
+          this_round_timeouts <<- bind_rows(this_round_timeouts, current_spec)
+          cat(" TIMEOUT (will retry)\n")
+        } else {
+          # Final timeout - add to failed models
+          failed_models <<- rbind(failed_models, data.frame(
+            model_name = model_name,
+            model_structure = model_structure,
+            spec_name = paste(model_structure, display_var, model_type, sep = "_"),
+            covariate = display_var,
+            model_type = model_type,
+            timeout_minutes = current_timeout,
+            status = "final_timeout",
+            error_message = paste("Timed out after", current_timeout, "minutes (final attempt)"),
+            stringsAsFactors = FALSE
+          ))
+          cat(" FINAL TIMEOUT\n")
+        }
+        return(NULL)
+        
+      }, error = function(e) {
+        # Log error - don't retry errors
+        this_round_errors <<- this_round_errors + 1
+        failed_models <<- rbind(failed_models, data.frame(
+          model_name = model_name,
+          model_structure = model_structure,
+          spec_name = paste(model_structure, display_var, model_type, sep = "_"),
+          covariate = display_var,
+          model_type = model_type,
+          timeout_minutes = current_timeout,
+          status = "error",
+          error_message = as.character(e$message),
+          stringsAsFactors = FALSE
+        ))
+        cat(" ERROR\n")
+        return(NULL)
+      })
+      
+      # Calculate runtime
+      end_time <- Sys.time()
+      runtime_minutes <- as.numeric(difftime(end_time, start_time, units = "mins"))
+      
+      # Store successful result
+      if (!is.null(model_result)) {
+        # Check if any models actually converged in the result
+        any_converged <- FALSE
+        
+        # Process each model_name in the result (should only be one)
+        for (result_model_name in names(model_result)) {
+          # Initialize model_name in final_results if it doesn't exist
+          if (is.null(final_results[[result_model_name]])) {
+            final_results[[result_model_name]] <- list()
+          }
+          
+          # Process each formula_name for this model
+          for (formula_name in names(model_result[[result_model_name]])) {
+            # Get the model data from new structure
+            model_data <- model_result[[result_model_name]][[formula_name]]
+            
+            # Check if this specific model converged
+            if (!is.null(model_data$fitted_model) && model_data$status == "converged") {
+              any_converged <- TRUE
+              
+              # Add run metadata
+              model_data$run_metadata <- list(
+                timeout_round = timeout_idx,
+                actual_runtime_minutes = runtime_minutes,
+                timeout_limit_minutes = current_timeout,
+                model_name = model_name,
+                model_structure = model_structure,
+                covariate = display_var,
+                model_type = model_type
+              )
+              
+              # Store in the structure
+              final_results[[result_model_name]][[formula_name]] <- model_data
+            } else {
+              # Model failed to converge - treat as error
+              this_round_errors <- this_round_errors + 1
+              failed_models <<- rbind(failed_models, data.frame(
+                model_name = model_name,
+                model_structure = model_structure,
+                spec_name = paste(model_structure, display_var, model_type, sep = "_"),
+                covariate = display_var,
+                model_type = model_type,
+                timeout_minutes = current_timeout,
+                status = "convergence_failed",
+                error_message = model_data$error_message %||% "Model did not converge",
+                stringsAsFactors = FALSE
+              ))
+            }
+          }
+        }
+        
+        if (any_converged) {
+          this_round_successes <- this_round_successes + 1
+          cat(" COMPLETED\n")
+        } else {
+          cat(" FAILED TO CONVERGE\n")
+        }
+      }
+      
+      # Periodic cleanup
+      if (i %% 5 == 0) {
+        gc()
+      }
+    }
+    
+    # Calculate round duration
+    round_end_time <- Sys.time()
+    round_duration <- difftime(round_end_time, round_start_time, units = "mins")
+    
+    # Update remaining combinations for next round
+    remaining_model_specs <- this_round_timeouts
+    
+    # Save progress after each timeout round
+    progress_data <- list(
+      models = final_results,
+      failed_models = failed_models,
+      timeout_round = timeout_idx,
+      current_timeout = current_timeout,
+      remaining_combinations = nrow(remaining_model_specs),
+      round_duration_minutes = as.numeric(round_duration),
+      covariate_specs = covariate_specs,
+      all_model_specs = all_model_specs,
+      settings = list(
+        covariates = covariates,
+        spline_vars = spline_vars,
+        spline_df = spline_df,
+        spline_type = spline_type,
+        time_varying = time_varying,
+        time_variable = time_variable,
+        time_breakpoints = time_breakpoints,
+        time_spline_df = time_spline_df,
+        constraint = constraint
+      )
+    )
+    
+    saveRDS(progress_data, file = here("data", "univar_progressive", paste0(save_prefix, "_round_", timeout_idx, "_", current_timeout, "min.rds")))
+    
+    # Enhanced round summary
+    cat("\n", paste(rep("=", 50), collapse = ""), "\n")
+    cat("--- Round", timeout_idx, "Summary ---\n")
+    cat("Round duration:", round(as.numeric(round_duration), 1), "minutes\n")
+    cat("Completed successfully:", this_round_successes, "\n")
+    cat("Errors (not retrying):", this_round_errors, "\n")
+    cat("Timed out (will retry):", nrow(this_round_timeouts), "\n")
+    cat("Total failed so far:", nrow(failed_models), "\n")
+    cat(paste(rep("=", 50), collapse = ""), "\n\n")
+  }
+  
+  # Count successful models for final summary
+  total_successful <- 0
+  n_linear <- 0
+  n_spline <- 0
+  
+  for (model_name in names(final_results)) {
+    for (formula_name in names(final_results[[model_name]])) {
+      model_data <- final_results[[model_name]][[formula_name]]
+      if (!is.null(model_data$fitted_model) && model_data$status == "converged") {
+        total_successful <- total_successful + 1
+        if (model_data$run_metadata$model_type == "linear") {
+          n_linear <- n_linear + 1
+        } else if (model_data$run_metadata$model_type == "spline") {
+          n_spline <- n_spline + 1
+        }
+      }
+    }
+  }
+  
+  # Final summary
+  cat("=== FINAL SUMMARY ===\n")
+  cat("Total successful models:", total_successful, "\n")
+  cat("  Linear models:", n_linear, "\n")
+  cat("  Spline models:", n_spline, "\n")
+  cat("Total failed models:", nrow(failed_models), "\n")
+  
+  if (nrow(failed_models) > 0) {
+    cat("\nFailure breakdown:\n")
+    print(table(failed_models$status, failed_models$model_type))
+  }
+  
+  # Save final results
+  final_data <- list(
+    models = final_results,
+    failed_models = failed_models,
+    timeout_sequence = timeout_vector,
+    covariate_specs = covariate_specs,
+    all_model_specs = all_model_specs,
+    settings = list(
+      covariates = covariates,
+      spline_vars = spline_vars,
+      spline_df = spline_df,
+      spline_type = spline_type,
+      time_varying = time_varying,
+      time_variable = time_variable,
+      time_breakpoints = time_breakpoints,
+      time_spline_df = time_spline_df,
+      constraint = constraint
+    )
+  )
+  
+  saveRDS(final_data, file = here("data", "univar_progressive", paste0(save_prefix, "_full_results.rds")))
+  cat("Final results saved\n")
+  
+  return(final_data)
+}
+
+#' Retry failed models without timeout constraints
+#' @param failed_results Output from univariate_progressive_timeout containing failed_models
+#' @param patient_data Patient data
+#' @param crude_rates Crude rates list
+#' @param covariate_specs Covariate specifications (from failed_results if available)
+#' @param n.cores Number of cores
+#' @param save_prefix Prefix for saving results
+#' @return List with retry results
+retry_failed_models <- function(failed_results,
+                                patient_data,
+                                crude_rates,
+                                covariate_specs = NULL,
+                                n.cores = min(8, parallel::detectCores() - 1),
+                                save_prefix = "univar_retry") {
+  
+  # Extract failed models and settings
+  failed_models <- failed_results$failed_models
+  settings <- failed_results$settings
+  
+  # Get covariate specs if not provided
+  if (is.null(covariate_specs)) {
+    if (!is.null(failed_results$covariate_specs)) {
+      covariate_specs <- failed_results$covariate_specs
+    } else {
+      # Rebuild specs from settings
+      covariate_specs <- build_univariate_specs(
+        settings$covariates,
+        settings$spline_vars
+      )
+    }
+  }
+  
+  # Filter to only final_timeout and error cases (exclude temporary timeouts)
+  failed_to_retry <- failed_models %>%
+    filter(status %in% c("final_timeout", "error"))
+  
+  if (nrow(failed_to_retry) == 0) {
+    cat("No failed models to retry!\n")
+    return(list(
+      models = list(),
+      failed_models = data.frame(),
+      settings = settings,
+      message = "No models needed retry"
+    ))
+  }
+  
+  cat("=== RETRYING FAILED MODELS (NO TIMEOUT) ===\n")
+  cat("Total models to retry:", nrow(failed_to_retry), "\n")
+  cat("  Final timeouts:", sum(failed_to_retry$status == "final_timeout"), "\n")
+  cat("  Errors:", sum(failed_to_retry$status == "error"), "\n\n")
+  
+  # Build model_specs for retry
+  retry_model_specs <- build_univariate_model_specs(
+    covariate_specs, names(crude_rates), 
+    settings$spline_df %||% 3, settings$spline_type %||% "ns",
+    settings$time_varying, settings$time_variable %||% "DaysSinceEntry",
+    settings$time_breakpoints, settings$time_spline_df %||% 3,
+    settings$constraint %||% "transition_specific"
+  )
+  
+  # Filter to only the failed models
+  retry_specs <- retry_model_specs %>%
+    filter(model_name %in% failed_to_retry$model_name)
+  
+  # Initialize results
+  retry_results <- list()
+  retry_failed <- data.frame(
+    model_name = character(),
+    model_structure = character(),
+    covariate = character(),
+    model_type = character(),
+    original_status = character(),
+    retry_status = character(),
+    error_message = character(),
+    runtime_minutes = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  retry_start_time <- Sys.time()
+  successes <- 0
+  failures <- 0
+  
+  # Process each failed model
+  for (i in seq_len(nrow(retry_specs))) {
+    current_spec <- retry_specs[i, ]
+    model_name <- current_spec$model_name
+    model_structure <- current_spec$model_structure
+    
+    # Find original failure info
+    original_failure <- failed_to_retry %>%
+      filter(model_name == !!model_name) %>%
+      slice(1)
+    
+    original_status <- original_failure$status
+    covariate_display <- original_failure$covariate
+    model_type <- original_failure$model_type
+    
+    cat(sprintf("  [%d/%d] %s: %s (%s, originally: %s)...", 
+                i, nrow(retry_specs), model_structure,
+                covariate_display, model_type, original_status))
+    
+    # Record start time
+    start_time <- Sys.time()
+    
+    # Try to fit WITHOUT timeout
+    model_result <- tryCatch({
+      fit_msm_models(
+        patient_data = patient_data,
+        crude_rates = crude_rates,
+        model_specs = current_spec,
+        mc.cores = n.cores
+      )
+    }, error = function(e) {
+      cat(" ERROR:", e$message, "\n")
+      return(NULL)
+    })
+    
+    # Calculate runtime
+    end_time <- Sys.time()
+    runtime_minutes <- as.numeric(difftime(end_time, start_time, units = "mins"))
+    
+    # Process result with enhanced error handling
+    if (!is.null(model_result)) {
+      # Check if model actually converged
+      model_converged <- FALSE
+      convergence_error <- NULL
+      
+      for (result_model_name in names(model_result)) {
+        if (is.null(retry_results[[result_model_name]])) {
+          retry_results[[result_model_name]] <- list()
+        }
+        
+        for (formula_name in names(model_result[[result_model_name]])) {
+          model_data <- model_result[[result_model_name]][[formula_name]]
+          
+          if (!is.null(model_data$fitted_model) && model_data$status == "converged") {
+            model_converged <- TRUE
+            
+            # Add retry metadata
+            model_data$run_metadata <- list(
+              retry_attempt = TRUE,
+              original_status = original_status,
+              actual_runtime_minutes = runtime_minutes,
+              model_name = model_name,
+              model_structure = model_structure,
+              covariate = covariate_display,
+              model_type = model_type
+            )
+            
+            retry_results[[result_model_name]][[formula_name]] <- model_data
+          } else {
+            # Capture convergence failure details
+            convergence_error <- model_data$error_message %||% "Model did not converge"
+          }
+        }
+      }
+      
+      if (model_converged) {
+        successes <- successes + 1
+        cat(" SUCCESS (", round(runtime_minutes, 1), "min )\n")
+        
+        retry_failed <- rbind(retry_failed, data.frame(
+          model_name = model_name,
+          model_structure = model_structure,
+          covariate = covariate_display,
+          model_type = model_type,
+          original_status = original_status,
+          retry_status = "success",
+          error_message = NA_character_,
+          runtime_minutes = runtime_minutes,
+          stringsAsFactors = FALSE
+        ))
+      } else {
+        failures <- failures + 1
+        cat(" FAILED TO CONVERGE (", round(runtime_minutes, 1), "min )\n")
+        
+        retry_failed <- rbind(retry_failed, data.frame(
+          model_name = model_name,
+          model_structure = model_structure,
+          covariate = covariate_display,
+          model_type = model_type,
+          original_status = original_status,
+          retry_status = "failed_convergence",
+          error_message = convergence_error %||% "Model did not converge",
+          runtime_minutes = runtime_minutes,
+          stringsAsFactors = FALSE
+        ))
+      }
+    } else {
+      failures <- failures + 1
+      
+      retry_failed <- rbind(retry_failed, data.frame(
+        model_name = model_name,
+        model_structure = model_structure,
+        covariate = covariate_display,
+        model_type = model_type,
+        original_status = original_status,
+        retry_status = "error",
+        error_message = "fit_msm_models returned NULL",
+        runtime_minutes = runtime_minutes,
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    # Periodic cleanup
+    if (i %% 5 == 0) {
+      gc()
+    }
+  }
+  
+  # Calculate total duration
+  retry_end_time <- Sys.time()
+  total_duration <- difftime(retry_end_time, retry_start_time, units = "mins")
+  
+  # Final summary
+  cat("\n", paste(rep("=", 60), collapse = ""), "\n")
+  cat("=== RETRY SUMMARY ===\n")
+  cat("Total retry duration:", round(as.numeric(total_duration), 1), "minutes\n")
+  cat("Models attempted:", nrow(retry_specs), "\n")
+  cat("Successful:", successes, "\n")
+  cat("Still failed:", failures, "\n")
+  cat("Success rate:", round(100 * successes / nrow(retry_specs), 1), "%\n")
+  cat(paste(rep("=", 60), collapse = ""), "\n\n")
+  
+  # Show breakdown by original status
+  if (nrow(retry_failed) > 0) {
+    cat("Breakdown by original failure reason:\n")
+    retry_summary <- retry_failed %>%
+      group_by(original_status, retry_status) %>%
+      summarise(n = n(), .groups = "drop") %>%
+      arrange(original_status, retry_status)
+    print(retry_summary)
+    cat("\n")
+  }
+  
+  # Save results
+  final_data <- list(
+    models = retry_results,
+    retry_failed = retry_failed,
+    retry_summary = if(exists("retry_summary")) retry_summary else NULL,
+    total_duration_minutes = as.numeric(total_duration),
+    settings = settings,
+    timestamp = Sys.time()
+  )
+  
+  saveRDS(final_data, file = here("data", "temp", paste0(save_prefix, "_results.rds")))
+  cat("Retry results saved to:", paste0(save_prefix, "_results.rds"), "\n")
+  
+  return(final_data)
+}
+
+## Time-varying models -------------------------------------------------------------
+
+run_all_time_models <- function(patient_data,
+                                crude_rates,
+                                covariates = NULL,
+                                spline_vars = NULL,
+                                spline_df = 3,
+                                spline_type = "ns",
+                                time_breakpoints = NULL,
+                                time_spline_df = 3,
+                                constraint = "transition_specific",
+                                mc.cores = min(8, parallel::detectCores() - 1)) {
+  
+  # Define the time-varying types and time variables to loop over
+  time_varying_options <- c("linear", "spline", "piecewise")
+  time_variables <- c("DaysSinceEntry", "CalendarTime")
+  
+  # Initialize a list to store results
+  results <- list()
+  
+  # Loop through each time variable
+  for (time_var in time_variables) {
+    
+    # Create a sublist for each time variable
+    results[[time_var]] <- list()
+    
+    # Loop through each time-varying specification
+    for (tv_type in time_varying_options) {
+      
+      # Optional: message for progress
+      message(paste("Fitting model with time variable =", time_var, 
+                    "and time-varying type =", tv_type))
+      
+      # Fit the model
+      model_result <- fit_msm_models(
+        patient_data = patient_data,
+        crude_rates = crude_rates,
+        
+        # Covariate specifications
+        covariates = covariates,
+        spline_vars = spline_vars,
+        spline_df = spline_df,
+        spline_type = spline_type,
+        
+        # Time-varying specs
+        time_varying = tv_type,
+        time_variable = time_var,
+        time_breakpoints = time_breakpoints,
+        time_spline_df = time_spline_df,
+        
+        # Constraint options
+        constraint = constraint,
+        
+        # Processing
+        mc.cores = mc.cores
+      )
+      
+      # Store in the results list
+      results[[time_var]][[tv_type]] <- model_result
+    }
+  }
+  
+  return(results)
+}
+
+
+# Helper functions -----------------------------------------------------------------
+
+## Helper functions for model run script ---------------------------------------
+
+#' Run a model fitting section with error handling and timing
+run_section <- function(section_name, section_config, fit_fn, ...) {
+  
+  result_file <- here("data", paste0(section_name, "_models.rds"))
+  
+  if (section_config$fit) {
+    cat("\n", rep("=", 70), "\n", sep = "")
+    cat("FITTING:", toupper(section_name), "MODELS\n")
+    cat(rep("=", 70), "\n", sep = "")
+    
+    start_time <- Sys.time()
+    
+    models <- tryCatch({
+      fit_fn(...)
+    }, error = function(e) {
+      cat("ERROR in", section_name, "fitting:", e$message, "\n")
+      return(NULL)
+    })
+    
+    end_time <- Sys.time()
+    runtime <- difftime(end_time, start_time, units = "mins")
+    
+    if (!is.null(models)) {
+      saveRDS(models, result_file)
+      cat("Runtime:", round(runtime, 2), "minutes\n")
+      cat("Saved to:", result_file, "\n")
+    }
+    
+    return(models)
+    
+  } else {
+    cat("\n=== LOADING:", toupper(section_name), "MODELS ===\n")
+    
+    if (file.exists(result_file)) {
+      models <- readRDS(result_file)
+      cat("Loaded from:", result_file, "\n")
+      return(models)
+    } else {
+      cat("WARNING: File not found:", result_file, "\n")
+      return(NULL)
+    }
+  }
+}
+
+#' Compile model results with error handling
+compile_section <- function(section_name, models, config) {
+  
+  if (is.null(models)) {
+    cat("WARNING: No models to compile for", section_name, "\n")
+    return(NULL)
+  }
+  
+  result_file <- here("data", paste0(section_name, "_comp.rds"))
+  
+  cat("\n=== COMPILING:", toupper(section_name), "RESULTS ===\n")
+  
+  start_time <- Sys.time()
+  
+  compiled <- tryCatch({
+    run_comprehensive_msm_analysis(
+      fitted_msm_models = models,
+      patient_data = pt_stg,
+      time_vec = time_vec,
+      analysis_config = config,
+      parallel = TRUE,
+      mc.cores = n.cores,
+      verbose = TRUE
+    )
+  }, error = function(e) {
+    cat("ERROR in", section_name, "compilation:", e$message, "\n")
+    return(NULL)
+  })
+  
+  end_time <- Sys.time()
+  runtime <- difftime(end_time, start_time, units = "mins")
+  
+  if (!is.null(compiled)) {
+    saveRDS(compiled, result_file)
+    cat("Runtime:", round(runtime, 2), "minutes\n")
+    cat("Saved to:", result_file, "\n")
+  }
+  
+  return(compiled)
+}
+
+#' Run cross-validation for a section
+run_cv_section <- function(section_name, models, cv_config) {
+  
+  if (is.null(models)) {
+    cat("WARNING: No models for CV in", section_name, "\n")
+    return(NULL)
+  }
+  
+  cat("\n=== CROSS-VALIDATION:", toupper(section_name), "===\n")
+  
+  start_time <- Sys.time()
+  
+  cv_result <- tryCatch({
+    do.call(cv_msm_models, c(
+      list(
+        fitted_models = models,
+        patient_data = pt_stg
+      ),
+      cv_config
+    ))
+  }, error = function(e) {
+    cat("ERROR in", section_name, "CV:", e$message, "\n")
+    return(NULL)
+  })
+  
+  end_time <- Sys.time()
+  runtime <- difftime(end_time, start_time, units = "mins")
+  
+  if (!is.null(cv_result)) {
+    cat("CV Runtime:", round(runtime, 2), "minutes\n")
+    cat("Results saved to:", cv_config$output_dir, "\n")
+  }
+  
+  return(cv_result)
 }
 
 ## Helper functions for model fitting ----------------------------------------------
@@ -317,9 +1269,6 @@ build_model_specifications <- function(covariates, spline_vars, spline_df, splin
             }
             processed_data_list[[modelname]] <- model_data
             
-            # After the spline loop, add debug:
-            cat("DEBUG: After spline processing, checking for spline columns in", modelname, "\n")
-            cat("  Columns:", paste(grep("_ns\\d+", names(processed_data_list[[modelname]]), value = TRUE), collapse = ", "), "\n")
           }
         }
       }
@@ -546,7 +1495,67 @@ create_model_metadata <- function(spec, covariates, spline_vars, spline_df, spli
   return(metadata)
 }
 
-### Helper functions for univariate models -----------------------------------------
+combine_model_lists <- function(list1, 
+                                list2, 
+                                model_names, 
+                                source = NULL) {
+  
+  # Validate inputs
+  if (!is.list(list1) || !is.list(list2)) {
+    stop("list1 and list2 must be lists")
+  }
+  
+  if (!is.character(model_names)) {
+    stop("model_names must be a character vector")
+  }
+  
+  # If source is not provided, create it based on where each model is found
+  if (is.null(source)) {
+    source <- sapply(model_names, function(name) {
+      in_list1 <- name %in% names(list1)
+      in_list2 <- name %in% names(list2)
+      
+      if (in_list1 && in_list2) {
+        warning(paste("Model", name, "found in both lists. Using list1. ",
+                      "Specify 'source' parameter to control selection."))
+        return(1)
+      } else if (in_list1) {
+        return(1)
+      } else if (in_list2) {
+        return(2)
+      } else {
+        stop(paste("Model", name, "not found in either list"))
+      }
+    })
+  }
+  
+  # Validate source vector
+  if (length(source) != length(model_names)) {
+    stop("source must be the same length as model_names")
+  }
+  
+  if (!all(source %in% c(1, 2))) {
+    stop("source must contain only 1 (for list1) or 2 (for list2)")
+  }
+  
+  # Build combined list
+  combined_list <- list()
+  
+  for (i in seq_along(model_names)) {
+    model_name <- model_names[i]
+    source_list <- if (source[i] == 1) list1 else list2
+    
+    if (!model_name %in% names(source_list)) {
+      stop(paste("Model", model_name, "not found in list", source[i]))
+    }
+    
+    combined_list[[model_name]] <- source_list[[model_name]]
+  }
+  
+  return(combined_list)
+}
+
+## Helper functions for univariate models -----------------------------------------
 
 # Helper function to build univariate specifications
 build_univariate_specs <- function(covariates, spline_vars) {
@@ -819,551 +1828,4 @@ print_combined_summary <- function(summary_stats) {
   print(summary_stats$by_structure)
 }
 
-## Univariate models with progressive timeouts -----------------------------
-
-univariate_progressive_timeout <- function(patient_data, 
-                                           crude_rates, 
-                                           covariates, 
-                                           n.cores,
-                                           # New parameters with sensible defaults
-                                           spline_vars = NULL,
-                                           spline_df = 3,
-                                           spline_type = "ns",
-                                           time_varying = NULL,
-                                           time_variable = "DaysSinceEntry",
-                                           time_breakpoints = NULL,
-                                           time_spline_df = 3,
-                                           constraint = "transition_specific",
-                                           # Timeout parameters
-                                           timeout_vector = c(5, 15, 30, 60), 
-                                           save_prefix = "msm_univar_progress") {
-  
-  # Build list of all covariate specifications to test
-  covariate_specs <- build_univariate_specs(covariates, spline_vars)
-  
-  # Initialize tracking
-  all_combinations <- expand.grid(
-    crude_rate_name = names(crude_rates),
-    spec_name = names(covariate_specs),
-    stringsAsFactors = FALSE
-  )
-  
-  # Initialize results structure
-  final_results <- list()
-  
-  # Track what still needs to be run
-  remaining_combinations <- all_combinations
-  failed_models <- data.frame(
-    crude_rate_name = character(),
-    spec_name = character(),
-    covariate = character(),
-    model_type = character(),
-    timeout_minutes = numeric(),
-    status = character(),
-    error_message = character(),
-    stringsAsFactors = FALSE
-  )
-  
-  cat("Starting progressive timeout analysis\n")
-  cat("Timeout sequence:", paste(timeout_vector, "mins", collapse = " -> "), "\n")
-  cat("Total combinations:", nrow(all_combinations), "\n")
-  cat("  Linear models:", sum(sapply(covariate_specs, function(x) x$type == "linear")), "\n")
-  cat("  Spline models:", sum(sapply(covariate_specs, function(x) x$type == "spline")), "\n\n")
-  
-  # Process each timeout level
-  for (timeout_idx in seq_along(timeout_vector)) {
-    current_timeout <- timeout_vector[timeout_idx]
-    
-    if (nrow(remaining_combinations) == 0) {
-      cat("All combinations completed! Stopping early.\n")
-      break
-    }
-    
-    cat("=== TIMEOUT ROUND", timeout_idx, "===\n")
-    cat("Current timeout:", current_timeout, "minutes\n")
-    cat("Combinations to attempt:", nrow(remaining_combinations), "\n\n")
-    
-    # Track round start time
-    round_start_time <- Sys.time()
-    
-    # Track what times out in this round
-    this_round_timeouts <- data.frame(
-      crude_rate_name = character(),
-      spec_name = character(),
-      stringsAsFactors = FALSE
-    )
-    
-    # Track successes for this round
-    this_round_successes <- 0
-    this_round_errors <- 0
-    
-    # Process remaining combinations
-    for (i in seq_len(nrow(remaining_combinations))) {
-      cr_name <- remaining_combinations$crude_rate_name[i]
-      spec_name <- remaining_combinations$spec_name[i]
-      spec <- covariate_specs[[spec_name]]
-      
-      cat(sprintf("  [%d/%d] %s + %s (%s, timeout: %d mins)...", 
-                  i, nrow(remaining_combinations), cr_name, 
-                  spec$variable, spec$type, current_timeout))
-      
-      # Prepare inputs based on spec type
-      current_crude_rates <- crude_rates[cr_name]
-      
-      if (spec$type == "linear") {
-        current_covariates <- spec$variable
-        current_spline_vars <- NULL
-      } else {  # spline
-        current_covariates <- NULL
-        current_spline_vars <- spec$variable
-      }
-      
-      # Record start time
-      start_time <- Sys.time()
-      
-      # Try to run with current timeout
-      model_result <- tryCatch({
-        withTimeout({
-          fit_msm_models(
-            patient_data = patient_data,
-            crude_rates = current_crude_rates,
-            covariates = current_covariates,
-            spline_vars = current_spline_vars,
-            spline_df = spline_df,
-            spline_type = spline_type,
-            time_varying = time_varying,
-            time_variable = time_variable,
-            time_breakpoints = time_breakpoints,
-            time_spline_df = time_spline_df,
-            constraint = constraint,
-            mc.cores = n.cores
-          )
-        }, timeout = current_timeout * 60)
-        
-      }, TimeoutException = function(e) {
-        # Add to timeout list for next round (if there is one)
-        if (timeout_idx < length(timeout_vector)) {
-          this_round_timeouts <<- rbind(this_round_timeouts, data.frame(
-            crude_rate_name = cr_name,
-            spec_name = spec_name,
-            stringsAsFactors = FALSE
-          ))
-          cat(" TIMEOUT (will retry)\n")
-        } else {
-          # Final timeout - add to failed models
-          failed_models <<- rbind(failed_models, data.frame(
-            crude_rate_name = cr_name,
-            spec_name = spec_name,
-            covariate = spec$variable,
-            model_type = spec$type,
-            timeout_minutes = current_timeout,
-            status = "final_timeout",
-            error_message = paste("Timed out after", current_timeout, "minutes (final attempt)"),
-            stringsAsFactors = FALSE
-          ))
-          cat(" FINAL TIMEOUT\n")
-        }
-        return(NULL)
-        
-      }, error = function(e) {
-        # Log error - don't retry errors
-        this_round_errors <<- this_round_errors + 1
-        failed_models <<- rbind(failed_models, data.frame(
-          crude_rate_name = cr_name,
-          spec_name = spec_name,
-          covariate = spec$variable,
-          model_type = spec$type,
-          timeout_minutes = current_timeout,
-          status = "error",
-          error_message = as.character(e$message),
-          stringsAsFactors = FALSE
-        ))
-        cat(" ERROR\n")
-        return(NULL)
-      })
-      
-      # Calculate runtime
-      end_time <- Sys.time()
-      runtime_minutes <- as.numeric(difftime(end_time, start_time, units = "mins"))
-      
-      # Store successful result
-      if (!is.null(model_result)) {
-        this_round_successes <- this_round_successes + 1
-        
-        # Process each model_name in the result
-        for (model_name in names(model_result)) {
-          # Initialize model_name in final_results if it doesn't exist
-          if (is.null(final_results[[model_name]])) {
-            final_results[[model_name]] <- list()
-          }
-          
-          # Process each formula_name for this model
-          for (formula_name in names(model_result[[model_name]])) {
-            # Get the existing model data
-            model_data <- model_result[[model_name]][[formula_name]]
-            
-            # Add run metadata
-            model_data$run_metadata <- list(
-              timeout_round = timeout_idx,
-              actual_runtime_minutes = runtime_minutes,
-              timeout_limit_minutes = current_timeout,
-              spec_name = spec_name,
-              covariate = spec$variable,
-              model_type = spec$type,
-              crude_rate_name = cr_name
-            )
-            
-            # Store in the structure: final_results[model_name][formula_name]
-            final_results[[model_name]][[formula_name]] <- model_data
-          }
-        }
-        cat(" COMPLETED\n")
-      }
-      
-      # Periodic cleanup
-      if (i %% 5 == 0) {
-        gc()
-      }
-    }
-    
-    # Calculate round duration
-    round_end_time <- Sys.time()
-    round_duration <- difftime(round_end_time, round_start_time, units = "mins")
-    
-    # Update remaining combinations for next round
-    remaining_combinations <- this_round_timeouts
-    
-    # Save progress after each timeout round
-    progress_data <- list(
-      models = final_results,
-      failed_models = failed_models,
-      timeout_round = timeout_idx,
-      current_timeout = current_timeout,
-      remaining_combinations = nrow(remaining_combinations),
-      round_duration_minutes = as.numeric(round_duration),
-      covariate_specs = covariate_specs,
-      settings = list(
-        covariates = covariates,
-        spline_vars = spline_vars,
-        spline_df = spline_df,
-        spline_type = spline_type,
-        time_varying = time_varying,
-        time_variable = time_variable,
-        constraint = constraint
-      )
-    )
-    
-    saveRDS(progress_data, file = here("data", "temp", paste0(save_prefix, "_round_", timeout_idx, "_", current_timeout, "min.rds")))
-    
-    # Enhanced round summary
-    cat("\n", paste(rep("=", 50), collapse = ""), "\n")
-    cat("--- Round", timeout_idx, "Summary ---\n")
-    cat("Round duration:", round(as.numeric(round_duration), 1), "minutes\n")
-    cat("Completed successfully:", this_round_successes, "\n")
-    cat("Errors (not retrying):", this_round_errors, "\n")
-    cat("Timed out (will retry):", nrow(this_round_timeouts), "\n")
-    cat("Total failed so far:", nrow(failed_models), "\n")
-    cat(paste(rep("=", 50), collapse = ""), "\n\n")
-  }
-  
-  # Count successful models for final summary
-  total_successful <- 0
-  n_linear <- 0
-  n_spline <- 0
-  
-  for (model_name in names(final_results)) {
-    for (formula_name in names(final_results[[model_name]])) {
-      model_data <- final_results[[model_name]][[formula_name]]
-      if (!is.null(model_data$fitted_model) && model_data$status == "converged") {
-        total_successful <- total_successful + 1
-        if (model_data$run_metadata$model_type == "linear") {
-          n_linear <- n_linear + 1
-        } else {
-          n_spline <- n_spline + 1
-        }
-      }
-    }
-  }
-  
-  # Final summary
-  cat("=== FINAL SUMMARY ===\n")
-  cat("Total successful models:", total_successful, "\n")
-  cat("  Linear models:", n_linear, "\n")
-  cat("  Spline models:", n_spline, "\n")
-  cat("Total failed models:", nrow(failed_models), "\n")
-  
-  if (nrow(failed_models) > 0) {
-    cat("\nFailure breakdown:\n")
-    print(table(failed_models$status, failed_models$model_type))
-  }
-  
-  # Save final results
-  final_data <- list(
-    models = final_results,
-    failed_models = failed_models,
-    timeout_sequence = timeout_vector,
-    covariate_specs = covariate_specs,
-    settings = list(
-      covariates = covariates,
-      spline_vars = spline_vars,
-      spline_df = spline_df,
-      spline_type = spline_type,
-      time_varying = time_varying,
-      time_variable = time_variable,
-      time_breakpoints = time_breakpoints,
-      time_spline_df = time_spline_df,
-      constraint = constraint
-    )
-  )
-  
-  saveRDS(final_data, file = here("data", "temp", paste0(save_prefix, "_full_results.rds")))
-  cat("Final results saved\n")
-  
-  return(final_data)
-}
-
-#' Retry failed models without timeout constraints
-#' @param failed_results Output from univariate_progressive_timeout containing failed_models
-#' @param patient_data Patient data
-#' @param crude_rates Crude rates list
-#' @param covariate_specs Covariate specifications (from failed_results if available)
-#' @param n.cores Number of cores
-#' @param save_prefix Prefix for saving results
-#' @return List with retry results
-retry_failed_models <- function(failed_results,
-                                patient_data,
-                                crude_rates,
-                                covariate_specs = NULL,
-                                n.cores = min(8, parallel::detectCores() - 1),
-                                save_prefix = "univar_retry") {
-  
-  # Extract failed models and settings
-  failed_models <- failed_results$failed_models
-  settings <- failed_results$settings
-  
-  # Get covariate specs if not provided
-  if (is.null(covariate_specs)) {
-    if (!is.null(failed_results$covariate_specs)) {
-      covariate_specs <- failed_results$covariate_specs
-    } else {
-      # Rebuild specs from settings
-      covariate_specs <- build_univariate_specs(
-        settings$covariates,
-        settings$spline_vars
-      )
-    }
-  }
-  
-  # Filter to only final_timeout and error cases (exclude temporary timeouts)
-  failed_to_retry <- failed_models %>%
-    filter(status %in% c("final_timeout", "error"))
-  
-  if (nrow(failed_to_retry) == 0) {
-    cat("No failed models to retry!\n")
-    return(list(
-      models = list(),
-      failed_models = data.frame(),
-      settings = settings,
-      message = "No models needed retry"
-    ))
-  }
-  
-  cat("=== RETRYING FAILED MODELS (NO TIMEOUT) ===\n")
-  cat("Total models to retry:", nrow(failed_to_retry), "\n")
-  cat("  Final timeouts:", sum(failed_to_retry$status == "final_timeout"), "\n")
-  cat("  Errors:", sum(failed_to_retry$status == "error"), "\n\n")
-  
-  # Initialize results
-  retry_results <- list()
-  retry_failed <- data.frame(
-    crude_rate_name = character(),
-    spec_name = character(),
-    covariate = character(),
-    model_type = character(),
-    original_status = character(),
-    retry_status = character(),
-    error_message = character(),
-    runtime_minutes = numeric(),
-    stringsAsFactors = FALSE
-  )
-  
-  retry_start_time <- Sys.time()
-  successes <- 0
-  failures <- 0
-  
-  # Process each failed model
-  for (i in seq_len(nrow(failed_to_retry))) {
-    cr_name <- failed_to_retry$crude_rate_name[i]
-    spec_name <- failed_to_retry$spec_name[i]
-    original_status <- failed_to_retry$status[i]
-    spec <- covariate_specs[[spec_name]]
-    
-    cat(sprintf("  [%d/%d] %s + %s (%s, originally: %s)...", 
-                i, nrow(failed_to_retry), cr_name, 
-                spec$variable, spec$type, original_status))
-    
-    # Prepare inputs
-    current_crude_rates <- crude_rates[cr_name]
-    
-    if (spec$type == "linear") {
-      current_covariates <- spec$variable
-      current_spline_vars <- NULL
-    } else {
-      current_covariates <- NULL
-      current_spline_vars <- spec$variable
-    }
-    
-    # Record start time
-    start_time <- Sys.time()
-    
-    # Try to fit WITHOUT timeout
-    model_result <- tryCatch({
-      fit_msm_models(
-        patient_data = patient_data,
-        crude_rates = current_crude_rates,
-        covariates = current_covariates,
-        spline_vars = current_spline_vars,
-        spline_df = settings$spline_df %||% 3,
-        spline_type = settings$spline_type %||% "ns",
-        time_varying = settings$time_varying,
-        time_variable = settings$time_variable %||% "DaysSinceEntry",
-        time_breakpoints = settings$time_breakpoints,
-        time_spline_df = settings$time_spline_df %||% 3,
-        constraint = settings$constraint %||% "transition_specific",
-        mc.cores = n.cores
-      )
-    }, error = function(e) {
-      cat(" ERROR:", e$message, "\n")
-      return(NULL)
-    })
-    
-    # Calculate runtime
-    end_time <- Sys.time()
-    runtime_minutes <- as.numeric(difftime(end_time, start_time, units = "mins"))
-    
-    # Process result
-    if (!is.null(model_result)) {
-      # Check if model actually converged
-      model_converged <- FALSE
-      
-      for (model_name in names(model_result)) {
-        if (is.null(retry_results[[model_name]])) {
-          retry_results[[model_name]] <- list()
-        }
-        
-        for (formula_name in names(model_result[[model_name]])) {
-          model_data <- model_result[[model_name]][[formula_name]]
-          
-          if (!is.null(model_data$fitted_model) && model_data$status == "converged") {
-            model_converged <- TRUE
-            
-            # Add retry metadata
-            model_data$run_metadata <- list(
-              retry_attempt = TRUE,
-              original_status = original_status,
-              actual_runtime_minutes = runtime_minutes,
-              spec_name = spec_name,
-              covariate = spec$variable,
-              model_type = spec$type,
-              crude_rate_name = cr_name
-            )
-            
-            retry_results[[model_name]][[formula_name]] <- model_data
-          }
-        }
-      }
-      
-      if (model_converged) {
-        successes <- successes + 1
-        cat(" SUCCESS (", round(runtime_minutes, 1), "min )\n")
-        
-        retry_failed <- rbind(retry_failed, data.frame(
-          crude_rate_name = cr_name,
-          spec_name = spec_name,
-          covariate = spec$variable,
-          model_type = spec$type,
-          original_status = original_status,
-          retry_status = "success",
-          error_message = NA_character_,
-          runtime_minutes = runtime_minutes,
-          stringsAsFactors = FALSE
-        ))
-      } else {
-        failures <- failures + 1
-        cat(" FAILED TO CONVERGE (", round(runtime_minutes, 1), "min )\n")
-        
-        retry_failed <- rbind(retry_failed, data.frame(
-          crude_rate_name = cr_name,
-          spec_name = spec_name,
-          covariate = spec$variable,
-          model_type = spec$type,
-          original_status = original_status,
-          retry_status = "failed_convergence",
-          error_message = "Model did not converge",
-          runtime_minutes = runtime_minutes,
-          stringsAsFactors = FALSE
-        ))
-      }
-    } else {
-      failures <- failures + 1
-      
-      retry_failed <- rbind(retry_failed, data.frame(
-        crude_rate_name = cr_name,
-        spec_name = spec_name,
-        covariate = spec$variable,
-        model_type = spec$type,
-        original_status = original_status,
-        retry_status = "error",
-        error_message = "fit_msm_models returned NULL",
-        runtime_minutes = runtime_minutes,
-        stringsAsFactors = FALSE
-      ))
-    }
-    
-    # Periodic cleanup
-    if (i %% 5 == 0) {
-      gc()
-    }
-  }
-  
-  # Calculate total duration
-  retry_end_time <- Sys.time()
-  total_duration <- difftime(retry_end_time, retry_start_time, units = "mins")
-  
-  # Final summary
-  cat("\n", paste(rep("=", 60), collapse = ""), "\n")
-  cat("=== RETRY SUMMARY ===\n")
-  cat("Total retry duration:", round(as.numeric(total_duration), 1), "minutes\n")
-  cat("Models attempted:", nrow(failed_to_retry), "\n")
-  cat("Successful:", successes, "\n")
-  cat("Still failed:", failures, "\n")
-  cat("Success rate:", round(100 * successes / nrow(failed_to_retry), 1), "%\n")
-  cat(paste(rep("=", 60), collapse = ""), "\n\n")
-  
-  # Show breakdown by original status
-  if (nrow(retry_failed) > 0) {
-    cat("Breakdown by original failure reason:\n")
-    retry_summary <- retry_failed %>%
-      group_by(original_status, retry_status) %>%
-      summarise(n = n(), .groups = "drop") %>%
-      arrange(original_status, retry_status)
-    print(retry_summary)
-    cat("\n")
-  }
-  
-  # Save results
-  final_data <- list(
-    models = retry_results,
-    retry_failed = retry_failed,
-    retry_summary = retry_summary,
-    total_duration_minutes = as.numeric(total_duration),
-    settings = settings,
-    timestamp = Sys.time()
-  )
-  
-  saveRDS(final_data, file = here("data", "temp", paste0(save_prefix, "_results.rds")))
-  cat("Retry results saved to:", paste0(save_prefix, "_results.rds"), "\n")
-  
-  return(final_data)
-}
 

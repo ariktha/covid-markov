@@ -15,7 +15,7 @@ editor_options:
   markdown: 
     wrap: 72
 execute:
-  cache: false
+  cache: true
 ---
 
 ```{r}
@@ -42,31 +42,31 @@ library(viridis)
 #| include: false
 
 source(here("R", "00-config.R"))
-source(here("R", "00-functions-tbl_figs.R"))
+source(here("R", "00x-fns-tbl_figs.R"))
 
 pt_stg <- readRDS(here("data", "temp", "pt_stg.rds"))
 
-# fitted_base_models <- readRDS(here("data", "temp", "fitted_base_models.rds"))
-base_models_comp <- readRDS(here("data", "temp", "base_models_comp.rds"))
+# base_models <- readRDS(here("data", "base_models.rds"))
+base_comp <- readRDS(here("data", "base_comp.rds"))
+base_cv <- readRDS(here("data", "cv_results", "base", "cv_summary_all_models.rds"))
+base_cv_metadata <- readRDS(here("data", "cv_results", "base", "cv_metadata.rds"))
 
 # Markov assumption
 # fitted_models_for_markov <- readRDS(here("data", "temp", "markov_comparison_models.rds"))
 markov_comp <- readRDS(here("data", "temp", "markov_model_comp.rds"))
-markov_pred <- readRDS(here("data", "temp", "markov_pred.rds"))
-
-# Time-homogeneity
-hospital_time_comp <- readRDS(here("data", "temp", "hospital_time_comp.rds"))
-calendar_time_comp <- readRDS(here("data", "temp", "calendar_time_comp.rds"))
-
-hospital_time_plot_data <- readRDS(here("data", "temp", "hospital_time_plot_data.rds"))
-calendar_time_plot_data <- readRDS(here("data", "temp", "calendar_time_plot_data.rds"))
 
 # Covariate effects
+# univariate_models <- readRDS(here("data", "temp", "univar_and_retried_full_results.rds"))
 univariate_comp <- readRDS(here("data", "temp", "univariate_comp.rds"))
-transition_specific_comp <- readRDS(here("data", "temp", "transition_specific_comp.rds"))
 
-spline_comp <- readRDS(here("data", "temp", "spline_comp.rds"))
+transition_cons_comp <- readRDS(here("data", "temp", "const_univariate_comp.rds"))
+
+# spline_comp <- readRDS(here("data", "temp", "spline_comp.rds"))
 spline_effects <- readRDS(here("data", "temp", "spline_effects.rds"))
+
+# Time-homogeneity
+# time_varying_models <- readRDS(here("data", "temp", "time_vary_models.rds"))
+time_homogeneity_comp <- readRDS(here("data", "temp", "time_vary_comp.rds"))
 
 # Long-stay sensitivity analysis
 truncated_model_comp <- readRDS(here("data", "temp", "truncated_model_comp.rds"))
@@ -228,9 +228,9 @@ for(i in category_rows) {
 
 kable(tab_one_pat_mat, format = "html", escape = FALSE) %>%
   kable_styling() %>%
-  pack_rows("Demographics", 2, 16,
+  pack_rows("Demographics", 2, 22,
             indent = TRUE, label_row_css = "font-weight: bold") %>%
-  pack_rows("Clinical Risk Factors", 17, 30,
+  pack_rows("Clinical Risk Factors", 23, 30,
             indent = TRUE, label_row_css = "font-weight: bold")
 
 kable(n_pat_enc %>% count(n_enc), 
@@ -296,9 +296,9 @@ kableone(modified_mat, format = "html", escape = FALSE) %>%
                      "Absorbing State" = ncol(mat_abs_clean))) %>%
   pack_rows("Demographics", 2, 22,
             indent = TRUE, label_row_css = "font-weight: bold") %>%
-  pack_rows("Clinical Risk Factors", 23, 41,
+  pack_rows("Clinical Risk Factors", 23, 46,
             indent = TRUE, label_row_css = "font-weight: bold") %>%
-  pack_rows("Encounter Characteristics", 42, 57,
+  pack_rows("Encounter Characteristics", 47, 57,
             indent = TRUE, label_row_css = "font-weight: bold")
 
 ```
@@ -841,32 +841,228 @@ kable(models_comparison %>%
 ### Multiple moderate states
 
 ```{r}
+#| label: moderate-states-model-comparison-loglik
+#| echo: true
+  
+mod_state_mods <- c("base_model", "mod_2", "mod_3")
+
+base_models_comp$model_summary %>%
+  dplyr::filter(model %in% mod_state_mods) %>%
+  mutate(model_name = case_when(model == "base_model" ~ "Base Model",
+                                model == "mod_2" ~ "2 Moderate States",
+                                model == "mod_3" ~ "3 Moderate States",
+                                TRUE ~ NA_character_)) %>%
+  dplyr::select(model_name, n_params, loglik, AIC, BIC) %>%
+  arrange(AIC)
 
 ```
 
+```{r}
+#| label: moderate-states-model-comparison-prevalences
+#| echo: true
+  
+mod_prev <- base_models_comp$prevalence %>%
+  dplyr::filter(model %in% mod_state_mods) %>%
+  mutate(model_name = case_when(model == "base_model" ~ "Base Model",
+                                model == "mod_2" ~ "2 Moderate States",
+                                model == "mod_3" ~ "3 Moderate States",
+                                TRUE ~ NA_character_)) %>%
+  dplyr::select(model_name, time, state, observed_count, 
+                expected_count, expected_count_ll, expected_count_ul,
+                N_at_risk)
+
+ggplot(data = subset(mod_prev, state %in% c("S", "D", "R")),
+       aes(x = factor(time))) +
+  geom_bar(aes(y = N_at_risk), 
+           stat = "identity", alpha = 0.3) +
+  geom_point(aes(y = observed_count, color = model_name), 
+             shape = 5, size = 2, position = position_dodge(width = 1)) +
+  geom_point(aes(y = expected_count, color = model_name), 
+             size = 2, position = position_dodge(width = 1)) +
+  geom_errorbar(aes(ymin = expected_count_ll, 
+                    ymax = expected_count_ul, color = model_name), 
+                width = 0.2, position = position_dodge(width = 1)) +
+  facet_wrap(~state, scales = "free_y") +
+  labs(x = "Time (days)", y = "Count") +
+  theme_minimal() 
+
+ggplot(data = subset(mod_prev, state %in% c("S", "D", "R")),
+       aes(x = factor(time))) +
+  geom_point(aes(y = observed_count, color = model_name), 
+             shape = 5, size = 2, position = position_dodge(width = 1)) +
+  geom_point(aes(y = expected_count, color = model_name), 
+             size = 2, position = position_dodge(width = 1)) +
+  geom_errorbar(aes(ymin = expected_count_ll, 
+                    ymax = expected_count_ul, color = model_name), 
+                width = 0.2, position = position_dodge(width = 1)) +
+  facet_wrap(~state, scales = "free_y") +
+  labs(x = "Time (days)", y = "Count") +
+  theme_minimal() 
+
+ggplot(data = subset(mod_prev, state %in% c("M", "M1", "M2", "M3")),
+       aes(x = factor(time))) +
+  geom_bar(aes(y = N_at_risk), 
+           stat = "identity", alpha = 0.3) +
+  geom_point(aes(y = observed_count, color = model_name, alpha = state), 
+             shape = 5, size = 2, position = position_dodge(width = 1)) +
+  geom_point(aes(y = expected_count, color = model_name, alpha = state), 
+             size = 2, position = position_dodge(width = 1)) +
+  geom_errorbar(aes(ymin = expected_count_ll, 
+                    ymax = expected_count_ul, color = model_name, alpha = state), 
+                width = 0.2, position = position_dodge(width = 1)) +
+  # facet_wrap(~state, scales = "free_y") +
+  labs(x = "Time (days)", y = "Count") +
+  theme_minimal() 
+
+ggplot(data = subset(mod_prev, state %in% c("M", "M1", "M2", "M3")),
+       aes(x = factor(time))) +
+  geom_point(aes(y = observed_count, color = model_name, alpha = state), 
+             shape = 5, size = 2, position = position_dodge(width = 1)) +
+  geom_point(aes(y = expected_count, color = model_name, alpha = state), 
+             size = 2, position = position_dodge(width = 1)) +
+  geom_errorbar(aes(ymin = expected_count_ll, 
+                    ymax = expected_count_ul, color = model_name, alpha = state), 
+                width = 0.2, position = position_dodge(width = 1)) +
+  # facet_wrap(~state, scales = "free_y") +
+  labs(x = "Time (days)", y = "Count") +
+  theme_minimal() +
+  scale_alpha_manual(values = c(1, 1, 0.5, 0.3), name = "State", breaks = c("M", "M1", "M2", "M3"))
+
+
+```
+
+```{r}
+#| label: moderate-states-model-comparison-pred
+#| echo: true
+
+
+
+```
 
 ### Multiple severe states
 
 ```{r}
+#| label: severe-states-model-comparison-loglik
+#| echo: true
+
+sev_state_mods <- c("base_model", "sev_2")
+
+base_models_comp$model_summary %>%
+  dplyr::filter(model %in% sev_state_mods) %>%
+  mutate(model_name = case_when(model == "base_model" ~ "Base Model",
+                                model == "sev_2" ~ "2 Severe States",
+                                TRUE ~ NA_character_)) %>%
+  dplyr::select(model_name, n_params, loglik, AIC, BIC) %>%
+  arrange(AIC)
 
 ```
 
+```{r}
+#| label: severe-states-model-comparison-prevalences
+#| echo: true
+
+sev_prev <- base_models_comp$prevalence %>%
+  dplyr::filter(model %in% sev_state_mods) %>%
+  mutate(model_name = case_when(model == "base_model" ~ "Base Model",
+                                model == "sev_2" ~ "2 Severe States",
+                                TRUE ~ NA_character_)) %>%
+  dplyr::select(model_name, time, state, observed_count, 
+                expected_count, expected_count_ll, expected_count_ul,
+                N_at_risk) %>%
+  mutate(state_type = ifelse(grepl("S", state) == TRUE, "S", state))
+
+ggplot(data = sev_prev, aes(x = factor(time))) +
+  geom_bar(aes(y = N_at_risk), 
+           stat = "identity", alpha = 0.3) +
+  geom_point(aes(y = observed_count, color = model_name, alpha = state), 
+             shape = 5, size = 2, position = position_dodge(width = 1)) +
+  geom_point(aes(y = expected_count, color = model_name, alpha = state), 
+             size = 2, position = position_dodge(width = 1)) +
+  geom_errorbar(aes(ymin = expected_count_ll, 
+                    ymax = expected_count_ul, 
+                    color = model_name, alpha = state), 
+                width = 0.2, position = position_dodge(width = 1)) +
+  facet_wrap(~state_type, scales = "free_y") +
+  labs(x = "Time (days)", y = "Count") +
+  theme_minimal() +
+  scale_alpha_manual(values = c(1, 1, 0.5, 1, 1, 1), 
+                     breaks = c("S", "S1", "S2", "M", "R", "D"),
+                     name = "State")
+  
+ggplot(data = sev_prev, aes(x = factor(time))) +
+  geom_point(aes(y = observed_count, color = model_name, alpha = state), 
+             shape = 5, size = 2, position = position_dodge(width = 1)) +
+  geom_point(aes(y = expected_count, color = model_name, alpha = state), 
+             size = 2, position = position_dodge(width = 1)) +
+  geom_errorbar(aes(ymin = expected_count_ll, 
+                    ymax = expected_count_ul, 
+                    color = model_name, alpha = state), 
+                width = 0.2, position = position_dodge(width = 1)) +
+  facet_wrap(~state_type, scales = "free_y") +
+  labs(x = "Time (days)", y = "Count") +
+  theme_minimal() +
+  scale_alpha_manual(values = c(1, 1, 0.5, 1, 1, 1), 
+                     breaks = c("S", "S1", "S2", "M", "R", "D"),
+                     name = "State")
+```
 
 ## Transition structure
 
 ### Simplified transitions
 
 ```{r}
+#| label: simplified-transitions-model-comparison-loglik
+#| echo: true
+
+simp_trans_mods <- c("base_model", "reduced_trans")
+
+base_models_comp$model_summary %>%
+  dplyr::select(model, n_params, loglik, AIC, BIC) %>%
+  dplyr::filter(model %in% simp_trans_mods) %>%
+  arrange(AIC)
 
 ```
-
-
-### Constrains on transitions
 
 ```{r}
+#| label: simplified-transitions-model-comparison-prevalences
+#| echo: true
+
+trans_prev <- base_models_comp$prevalence %>%
+  dplyr::filter(model %in% simp_trans_mods) %>%
+  mutate(model_name = case_when(model == "base_model" ~ "Base Model",
+                                model == "reduced_trans" ~ "Simplified transitions",
+                                TRUE ~ NA_character_)) %>%
+  dplyr::select(model_name, time, state, observed_count, 
+                expected_count, expected_count_ll, expected_count_ul,
+                N_at_risk)
+  
+ggplot(trans_prev, aes(x = factor(time))) +
+  geom_bar(aes(y = N_at_risk), 
+           stat = "identity", alpha = 0.3) +
+  geom_point(aes(y = observed_count, color = model_name), 
+             shape = 5, size = 2, position = position_dodge(width = 1)) +
+  geom_point(aes(y = expected_count, color = model_name), 
+             size = 2, position = position_dodge(width = 1)) +
+  geom_errorbar(aes(ymin = expected_count_ll, 
+                    ymax = expected_count_ul, color = model_name), 
+                width = 0.2, position = position_dodge(width = 1)) +
+  facet_wrap(~state, scales = "free_y") +
+  labs(x = "Time (days)", y = "Count") +
+  theme_minimal()
+
+ggplot(trans_prev, aes(x = factor(time))) +
+  geom_point(aes(y = observed_count, color = model_name), 
+             shape = 5, size = 2, position = position_dodge(width = 1)) +
+  geom_point(aes(y = expected_count, color = model_name), 
+             size = 2, position = position_dodge(width = 1)) +
+  geom_errorbar(aes(ymin = expected_count_ll, 
+                    ymax = expected_count_ul, color = model_name), 
+                width = 0.2, position = position_dodge(width = 1)) +
+  facet_wrap(~state) +
+  labs(x = "Time (days)", y = "Count") +
+  theme_minimal()
 
 ```
-
 
 # Markov property
 
@@ -1086,6 +1282,40 @@ ggplot(combined_univariate_comp_long,
 
 ```
 
+```{r}
+#| label: univariate-effects-loglik
+#| echo: true
+#| eval: false
+
+base_loglik <- base_models_comp$model_summary %>%
+  dplyr::filter(model == "base_model") %>%
+  dplyr::select(model, covariate, constraint_type, n_params, loglik, AIC, BIC) %>%
+  pivot_longer(cols = c(n_params, loglik, AIC, BIC), 
+               names_to = "metric", 
+               values_to = "value")
+
+univar_loglik_long <- univariate_comp$model_summary %>%
+  rbind(transition_cons_comp$model_summary) %>%
+  dplyr::select(model, covariate, constraint_type, n_params, loglik, AIC, BIC) %>%
+  pivot_longer(cols = c(n_params, loglik, AIC, BIC), 
+               names_to = "metric", 
+               values_to = "value")
+
+ggplot(univar_loglik_long, aes(x = covariate, y = value, shape = constraint_type)) +
+  geom_line(data = base_loglik, aes(x = covariate, y = value), 
+            linetype = "dashed", color = "darkgrey", linewidth = 0.8) +
+  geom_point(size = 3, position = position_dodge(0.7)) +
+  facet_wrap(~ metric, scales = "free_y", nrow = 4) +
+  scale_color_viridis(option = "mako", na.value = "darkgrey") +
+  scale_shape_manual(values = c(16, 15, 17, 1), na.translate = FALSE) +
+  labs(x = "Covariate", y = "Value", color = "Model", shape = "Constraint type") +
+  theme_minimal() +
+  theme(legend.position = "bottom", axis.title = element_blank()) +
+  guides(color = "none")
+
+
+```
+
 ## Spline effects
 
 ### Transition intensities
@@ -1132,3 +1362,10 @@ ggplot(spline_effects_plot, aes(x = eval_value, color = trend)) +
   theme(strip.text = element_text(face = "bold"),
         legend.position = "bottom")
 ```
+
+## Constrains on transitions
+
+```{r}
+
+```
+
