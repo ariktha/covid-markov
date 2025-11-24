@@ -2,8 +2,8 @@ library(here)
 
 ## Setup
 
-source(here("scripts", "00-config.R"))
-source(here("scripts", "00-functions.R"))
+source(here("R", "00-config.R"))
+source(here("R", "00a-fns-data_preprocess.R"))
 
 ## Read raw data files
 
@@ -91,7 +91,7 @@ summary(dm_inp$pos_adm)
 boxplot(dm_inp$pos_adm, ylab = "Days", main = "Days from admission to positive COVID test")
 
 enc_ids <- dm_inp$deid_enc_id
-saveRDS(enc_ids, here("data", "encounter_ids.rds"))
+saveRDS(enc_ids, here("data", "preprocess", "encounter_ids.rds"))
 
 pat_ids <- unique(dm_inp$deid_pat_id)
-saveRDS(pat_ids, here("data", "patient_ids.rds"))
+saveRDS(pat_ids, here("data", "preprocess", "patient_ids.rds"))

@@ -1,0 +1,484 @@
+---
+title: "Multi-State Model Analysis: Base model"
+date: today
+format:
+  html:
+    df-print: paged
+    toc: true
+    toc-float: true
+    toc-depth: 3
+    code-fold: true
+    theme: default
+    embed-resources: true
+editor: source
+editor_options: 
+  markdown: 
+    wrap: 72
+execute:
+  cache: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+rm(list = ls())
+
+library(here)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(tableone)
+library(Hmisc)
+library(ggpubr)
+library(viridis)
+
+```
+
+```{r}
+#| label: load-data
+#| include: false
+
+source(here("R", "00-config.R"))
+source(here("R", "00c-fns-model_fitting.R"))
+source(here("R", "00d-fns-model_eval.R"))
+source(here("R", "00f-fns-tbl_figs.R"))
+
+pt_stg <- readRDS(here("data", "pt_stg.rds"))
+crude_rates <- readRDS(here("data", "crude_rates.rds"))
+
+base_mod <- readRDS(here("data", "base_model", "base_mod.rds"))
+base_comp <- readRDS(here("data", "base_model", "base_analysis.rds"))
+base_cv_summ <- readRDS(here("data", "base_model", "cv_summary_all_models.rds"))
+base_cv <- readRDS(here("data", "base_model", "cv_base_model_X..1.rds"))
+
+state_colors <- tibble(
+  states = c("M", "S", "D", "R"),
+  color = c("#3484A5FF", "#403872FF", "#0B0405FF", "#60CEACFF")
+)
+```
+
+```{r}
+#| label: state-table-prep
+
+get_state_table <- function(model_name) {
+  model_data <- subset(pt_stg, model == model_name)
+  st <- statetable.msm(state, deid_enc_id, data = model_data)
+  st_df <- as.data.frame(st) %>%
+    mutate(across(c(from, to), as.character)) %>%
+    filter(from %in% state_order, to %in% state_order) %>%
+    mutate(
+      from = factor(from, levels = rev(state_order)),
+      to = factor(to, levels = state_order),
+      Freq = ifelse(Freq == 0, NA, Freq)
+    )
+  return(st_df)
+}
+
+st <- get_state_table("base_model")
+```
+
+```{r}
+#| label: state-table-plot
+
+st_plot <- ggplot(st, aes(x = to, y = from, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = scales::comma(Freq)), 
+            color = "#342722", size = 3, fontface = "bold") +
+  scale_fill_gradient(
+    name = "Count", 
+    low = "#EFD06F", 
+    high = "#F7AC8E", 
+    na.value = "white") +
+  # scale_fill_viridis_c(
+  #   name = "Count", 
+  #   trans = "log10", 
+  #   na.value = "white", 
+  #   limits = c(1, 10000),
+  #   breaks = c(1, 10, 100, 1000, 10000),
+  #   labels = c("1", "10", "100", "1000", "10000"),
+  #   direction = -1,
+  #   option = "mako"
+  # ) +
+  theme_minimal(base_size = 10) +
+  labs(x = "To", y = "From") +
+  guides(fill = "none")
+
+st_plot
+
+```
+
+```{r}
+#| label: transition-intensities-prep
+
+qmat_base <- base_comp$qmatrix
+
+qmat_data <- qmat_base %>%
+  dplyr::select(model_name, statename, tostatename, 
+                estimate, conf.low, conf.high) %>%
+  rename(
+    model = model_name,
+    from = statename,
+    to = tostatename,
+    q_estimate = estimate,
+    q_conf_low = conf.low,
+    q_conf_high = conf.high
+  ) %>%
+  left_join(models_df, by = "model") %>%
+  left_join(trend_types, by = c("from", "to"))
+
+qmat_data <- qmat_data %>%
+  mutate(
+    from = factor(from, levels = state_order),
+    to = factor(to, levels = state_order),
+    transition = paste0(from, " → ", to),
+    transition = factor(transition, levels = paste0(rep(state_order, each = length(state_order)), 
+                                                   " → ", 
+                                                   rep(state_order, times = length(state_order))))
+  ) %>%
+  filter(transition %in% unique(transition)) %>%
+  mutate(model_name = factor(model_name, levels = models_df$model_name)) %>%
+  mutate(text = format_ci(q_estimate, q_conf_low, q_conf_high, digits = 2))
+
+```
+
+```{r}
+#| label: transition-intensities-plot
+
+trans_intens_plot <- ggplot(qmat_data, aes(x = q_estimate, y = fct_rev(transition), color = trend)) +
+  geom_point(size = 2.5) +
+  geom_errorbar(aes(xmin = q_conf_low, xmax = q_conf_high), height = 0.2, show.legend = FALSE) +
+  scale_color_manual(values = trend_colors, name = "Transition trend") +
+  labs(x = "Fitted transition intensity (per day)", y = "Transition") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom") +
+  guides(color = "none") 
+
+trans_intens_plot
+
+```
+
+```{r}
+#| label: probability-matrices-prep
+
+pmat_base <- base_comp$pmats
+
+pmat_long <- pmat_base %>%
+  dplyr::select(model_name, t_value, statename, tostatename, estimate, conf.low, conf.high) %>%
+  rename(
+    model = model_name,
+    p_estimate = estimate,
+    p_conf_low = conf.low,
+    p_conf_high = conf.high,
+    time = t_value,
+    from = statename,
+    to = tostatename
+  ) %>%
+  left_join(models_df, by = "model") %>%
+  mutate(
+    from = factor(from, levels = state_order),
+    to = factor(to, levels = state_order),
+    transition = paste0(from, " → ", to),
+    transition = factor(transition, levels = paste0(rep(state_order, each = length(state_order)), 
+                                                   " → ", 
+                                                   rep(state_order, times = length(state_order))))
+  ) %>%
+  filter(transition %in% unique(transition)) %>%
+  left_join(trend_types, by = c("from", "to")) %>%
+  mutate(model_name = factor(model_name, levels = models_df$model_name)) %>%
+  mutate(text = format_ci(p_estimate, p_conf_low, p_conf_high, digits = 2)) %>%
+  drop_na() %>%
+  mutate(to = factor(to, levels = state_order),
+         from = factor(from, levels = state_order))
+```
+
+```{r}
+#| label: probability-matrices-plot
+
+pmat_plot <- ggplot(pmat_long, aes(x = time, y = p_estimate, color = trend)) +
+  geom_point(size = 1.5, alpha = 0) +
+  geom_line(size = 1, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = p_conf_low, ymax = p_conf_high, fill = trend), 
+              alpha = 0.5, color = NA, show.legend = FALSE) +
+  scale_color_manual(values = trend_colors, name = "Transition trend") +
+  scale_fill_manual(values = trend_colors) +
+  facet_grid(from ~ to) +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom") +
+  ylim(c(0, 1)) +
+  scale_x_continuous(breaks = c(0, 15, 30), limits = c(0, 30),
+                     name = "Time since entry (days)") +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.5), limits = c(0, 1),
+                     name = "Transition probability") +
+  guides(color = guide_legend(override.aes = list(size = 4, shape = 15, alpha = 1)))
+
+pmat_plot
+
+```
+
+```{r}
+#| label: sojourn-times-prep
+
+soj_base <- base_comp$sojourns
+
+sojourn_data <- soj_base %>%
+  dplyr::select(model_name, state, estimates, L, U) %>%
+  rename(
+    model = model_name,
+    sojourn_estimate = estimates,
+    sojourn_conf_low = L,
+    sojourn_conf_high = U
+  ) %>%
+  left_join(models_df, by = "model") %>%
+  mutate(
+    state = factor(state, levels = state_order),
+    model_name = factor(model_name, levels = models_df$model_name),
+    text = format_ci(sojourn_estimate, sojourn_conf_low, sojourn_conf_high, digits = 2),
+    state_type = ifelse(grepl("M", state) == TRUE, "Moderate", "Severe")
+  )
+
+```
+
+```{r}
+#| label: sojourn-times-plot
+
+soj_plot <- ggplot(sojourn_data, aes(y = state, x = sojourn_estimate, color = state)) +
+  geom_point(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(xmin = sojourn_conf_low, xmax = sojourn_conf_high), width = 0.2, show.legend = FALSE) +
+  labs(y = "State", x = "Mean sojourn time (days)") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "none") +
+  scale_x_continuous(limits = c(0, 18), breaks = seq(0, 18, by = 2)) +
+  scale_color_manual(values = state_colors$color,
+                     breaks = state_colors$states,
+                     name = "State") +
+  guides(color = "none") 
+
+soj_plot
+
+```
+
+```{r}
+#| label: prevalence-prep
+
+prev_base <- base_comp$prevalence
+
+prev_base_long <- prev_base %>%
+  dplyr::select(model_name, time, state, starts_with("observed"), starts_with("expected")) %>%
+  rename(
+    model = model_name
+  ) %>%
+  left_join(models_df, by = "model") %>%
+  mutate(
+    state = factor(state, levels = state_order),
+    model_name = factor(model_name, levels = models_df$model_name)
+  )
+
+```
+
+```{r}
+#| label: prevalence-plot
+
+prev_plot <- ggplot(prev_base_long, aes(x = time, y = expected_count, color = state)) +
+  geom_point(size = 1.5, alpha = 0) +
+  geom_line(size = 1, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = expected_count_ll, ymax = expected_count_ul, fill = state), 
+              alpha = 0.3, color = NA, show.legend = FALSE) +
+  geom_line(aes(y = observed_count), linetype = "dashed", size = 0.8, show.legend = FALSE) +
+  labs(x = "Time since entry (days)", y = "Prevalence") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom") +
+  scale_x_continuous(breaks = seq(0, 28, by = 7), limits = c(0, 28))  +
+  scale_color_manual(values = state_colors$color,
+                     breaks = state_colors$states,
+                     name = "State") +
+  scale_fill_manual(values = state_colors$color,
+                    breaks = state_colors$states,
+                    name = "State") +
+  guides(color = guide_legend(override.aes = list(size = 4, shape = 15, alpha = 1)))
+
+prev_plot
+
+```
+
+```{r}
+#| label: cv-results-prep
+
+metric_order <- c("brier_death", "brier_severe", 
+                  "death_auc", "severe_auc", 
+                  "calibration_slope_death", "calibration_slope_severe", 
+                  "total_los_mae", "days_severe_mae")
+
+metric_labels <- c("brier_death" = "Brier Score: Death",
+                   "brier_severe" = "Brier Score: Severe",
+                   "death_auc" = "AUROC: Death",
+                   "severe_auc" = "AUROC: Severe",
+                   "calibration_slope_death" = "Calibration Slope: Death",
+                   "calibration_slope_severe" = "Calibration Slope: Severe",
+                   "total_los_mae" = "MAE: Total LOS",
+                   "days_severe_mae" = "MAE: Days Severe")
+
+cv_base <- base_cv$fold_metrics
+
+cv_base_summary <- cv_base %>%
+  pivot_longer(
+    cols = -fold,
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  dplyr::filter(metric %in% metric_order) %>%
+  mutate(
+    metric = factor(metric, levels = metric_order, labels = metric_labels[metric_order])
+  )
+
+```
+
+```{r}
+#| label: cv-results-plot
+
+cv_plot <- ggplot(cv_base_summary, aes(x = value, y = metric)) +
+  geom_boxplot() +
+  geom_point() +
+  theme_minimal(base_size = 14) +
+  facet_wrap(~ metric, scales = "free", ncol = 2) +
+  theme(axis.text.y = element_blank(),
+        axis.title = element_blank())
+
+cv_plot
+
+cv_plot_slides <- ggplot(subset(cv_base_summary, metric %in% c("AUROC: Death", "AUROC: Severe", "MAE: Total LOS", "MAE: Days Severe")), 
+                         aes(x = value, y = metric)) +
+  geom_boxplot() +
+  geom_point() +
+  theme_minimal(base_size = 14) +
+  facet_wrap(~ metric, scales = "free", ncol = 2) +
+  theme(axis.text.y = element_blank(),
+        axis.title = element_blank())
+
+cv_plot_slides
+
+```
+
+```{r}
+#| label: combined-plot
+
+design <- "
+AB
+CD
+CE
+"
+
+st_plot + 
+  trans_intens_plot +
+  pmat_plot +
+  soj_plot +
+  prev_plot +
+  plot_layout(design = design, 
+              guides = "collect",
+              heights = c(1.5, 0.8, 1.2),
+              widths = c(1, 1)) & 
+  theme(legend.position = "bottom")
+
+ggsave(here("figs", "base_model_summary_plots.png"), 
+       width = 9, height = 5, dpi = 300)
+
+```
+
+```{r}
+#| label: expected-visits
+
+envisits_from_m <- msm::envisits.msm(base_mod$base_model$`~ 1`$fitted_model, 
+                                     start = 1,
+                                     ci = "normal")
+
+envisits_from_s <- msm::envisits.msm(base_mod$base_model$`~ 1`$fitted_model, 
+                                     start = 2,
+                                     ci = "normal")
+
+state_names <- colnames(envisits_from_m)
+n_states <- length(state_names)
+
+visits_tidy <- data.frame(
+    to_state = state_names,
+    expected_visits_from_m = envisits_from_m["res", ],
+    expected_visits_from_s = envisits_from_s["res", ],
+    stringsAsFactors = FALSE
+  )
+
+visits_tidy$lower_ci_from_m <- envisits_from_m["2.5%", ]
+visits_tidy$upper_ci_from_m <- envisits_from_m["97.5%", ]
+
+visits_tidy$lower_ci_from_s <- envisits_from_s["2.5%", ]
+visits_tidy$upper_ci_from_s <- envisits_from_s["97.5%", ]
+
+visits_long <- visits_tidy %>%
+  pivot_longer(
+    cols = !to_state,
+    names_to = c("metric", "from_state"),
+    names_sep = "_from_",
+    values_to = "value"
+  ) %>%
+  pivot_wider(
+    names_from = metric,
+    values_from = value
+  )
+
+visits_plot_dat <- visits_long %>%
+  dplyr::filter(to_state %in% c("M", "S"))
+
+exp_vis <- ggplot(data = visits_plot_dat, aes(y = from_state)) +
+  geom_point(aes(x = expected_visits, color = to_state)) +
+  geom_errorbar(aes(xmin = lower_ci, xmax = upper_ci, color = to_state), width = 0.2,
+                show.legend = FALSE) +
+  labs(y = "From State", x = "Expected Visits") +
+  theme_minimal(base_size = 12) +
+  scale_color_manual(values = state_colors$color,
+                     breaks = state_colors$states,
+                     name = "State") +
+  scale_y_discrete(labels = c("m" = "M", "s" = "S")) +
+  theme(legend.position = "bottom") +
+  xlim(c(0, 1)) +
+  guides(color = guide_legend(override.aes = list(size = 4, shape = 15, alpha = 1)))
+
+exp_vis
+
+```
+
+```{r}
+#| label: slide-deck-plot
+#| fig.width: 10
+#| fig.height: 3
+
+design2 <- "
+ABCE
+ABDE
+"
+
+trans_intens_plot +
+  pmat_plot +
+  exp_vis +
+  soj_plot +
+  cv_plot_slides +
+  plot_layout(design = design2, 
+              guides = "collect",
+              heights = c(1, 1, 1),
+              widths = c(1, 1)) & 
+  theme(legend.position = "bottom",
+        panel.spacing.x = unit(1, "lines"))
+
+ggsave(here("figs", "base_model_slide_deck_plots.png"), 
+       width = 14, height = 4, dpi = 300)
+
+```
+
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+
+```
