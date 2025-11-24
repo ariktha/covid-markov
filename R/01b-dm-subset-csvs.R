@@ -2,18 +2,17 @@ library(here)
 
 ## Setup
 
-source(here("scripts", "00-config.R"))
-source(here("scripts", "00-functions.R"))
+source(here("R", "00-config.R"))
 
 ## Read encounter ids and patient ids
 
-enc_ids <- readRDS(here("data", "encounter_ids.rds"))
-pat_ids <- readRDS(here("data", "patient_ids.rds"))
+enc_ids <- readRDS(here("data", "preprocess", "encounter_ids.rds"))
+pat_ids <- readRDS(here("data", "preprocess", "patient_ids.rds"))
 
 # Reading and saving data from the files that are specific to patients or encounters
 
 # Define the file paths and filtering parameters
-file_paths <- list.files(here("data", "raw"), pattern = "*.csv", full.names = TRUE)  # Adjust path and pattern as needed
+file_paths <- list.files(here("data", "raw"), pattern = "*.csv", full.names = TRUE) 
 primary_filter_column <- "deid_pat_id"  
 primary_filter_values <- pat_ids
 
@@ -78,7 +77,7 @@ filtered_files <- lapply(file_paths, function(file) {
 names(filtered_files) <- basename(file_paths)
 
 # Save each filtered dataset to its own RDS file
-output_dir <- here("data")
+output_dir <- here("data", "preprocess")
 dir.create(output_dir, showWarnings = FALSE)  # Ensure output directory exists
 
 for (file_name in names(filtered_files)) {
@@ -102,6 +101,6 @@ for (file_name in names(filtered_files)) {
 o2_dev_names <- read_csv(here("data", "raw", "others", "o2_dev_names.csv"))
 diagnosis_classification <- read_csv(here("data", "raw", "others", "primary_diagnoses_SB.csv"))
 
-saveRDS(o2_dev_names, here("data", "o2_dev_names.rds"))
-saveRDS(diagnosis_classification, here("data", "primary_diagnoses_SB.rds"))
+saveRDS(o2_dev_names, here("data", "preprocess", "o2_dev_names.rds"))
+saveRDS(diagnosis_classification, here("data", "preprocess", "primary_diagnoses_SB.rds"))
 

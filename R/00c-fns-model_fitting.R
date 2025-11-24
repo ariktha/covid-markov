@@ -1,54 +1,3 @@
-# Data wrangling -------------------------------------------------------------------
-
-add_calendar_time <- function(patient_data, date_column = "Date") {
-  # Check if the specified date column exists
-  if (!date_column %in% names(patient_data)) {
-    stop(paste("Column", date_column, "not found in the data"))
-  }
-  
-  # Convert the specified date column to actual dates if it's not already
-  if (!inherits(patient_data[[date_column]], "Date")) {
-    patient_data[[date_column]] <- as.Date(patient_data[[date_column]])
-  }
-  
-  # Find the first date in the dataset
-  first_date <- min(patient_data[[date_column]], na.rm = TRUE)
-  
-  # Add CalendarTime column (sequential days from first date)
-  patient_data$CalendarTime <- as.numeric(patient_data[[date_column]] - first_date) + 1
-  
-  return(patient_data)
-}
-
-# Model setup ----------------------------------------------------------------------
-
-calc_crude_init_rates <- function(patient_data, qmat_list) {
-  
-  crude_results <- list()
-  for (modelname in unique(patient_data$model)) {
-    
-    model_data <- patient_data[which(patient_data$model == modelname),]
-    qmat <- qmat_list[[modelname]]
-    
-    crude_result <- tryCatch({
-      crudeinits.msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, qmatrix = qmat)
-    }, error = function(e) {
-      warning(paste("Error calculating crude rates for", modelname, ":", e$message))
-      return(NULL)
-    })
-    
-    # Save the crude rates and the model name
-    if (!is.null(crude_result)) {
-      crude_results[[modelname]] <- list(
-        qmat = crude_result,
-        modelname = modelname
-      )
-    }
-  }
-  
-  return(crude_results)
-}
-
 # Model fitting --------------------------------------------------------------------
 
 ## Core fitting function -----------------------------------------------------------
@@ -67,6 +16,8 @@ fit_msm_models <- function(patient_data,
                            time_breakpoints = NULL,
                            time_spline_df = 3,
                            constraint = "transition_specific",
+                           
+                           require_se = FALSE,
                            
                            # Processing options
                            mc.cores = min(8, parallel::detectCores() - 1)) {
@@ -222,7 +173,7 @@ fit_msm_models <- function(patient_data,
     
     # Try multiple optimization methods
     fitted_model <- try_multiple_optimizations(
-      processed_data, crude_result, covariate_formula, constraint_for_msm
+      processed_data, crude_result, covariate_formula, constraint_for_msm, require_se = require_se
     )
     
     # Create comprehensive metadata
@@ -243,7 +194,8 @@ fit_msm_models <- function(patient_data,
         optimization_method = fitted_model$method,
         metadata = metadata,
         crude_rates = crude_result,
-        error_message = NULL
+        error_message = NULL,
+        runtime = as.numeric(difftime(Sys.time(), start_time, units = "auto"))
       )
     } else {
       list(
@@ -252,7 +204,8 @@ fit_msm_models <- function(patient_data,
         optimization_method = fitted_model$method,
         metadata = metadata,
         crude_rates = crude_result,
-        error_message = fitted_model$error
+        error_message = fitted_model$error,
+        runtime = as.numeric(difftime(Sys.time(), start_time, units = "auto"))
       )
     }
     
@@ -394,6 +347,7 @@ univariate_progressive_timeout <- function(patient_data,
                                            time_breakpoints = NULL,
                                            time_spline_df = 3,
                                            constraint = "transition_specific",
+                                           require_se = FALSE,
                                            # Timeout parameters
                                            timeout_vector = c(5, 15, 30, 60), 
                                            save_prefix = "msm_univar_progress") {
@@ -504,7 +458,8 @@ univariate_progressive_timeout <- function(patient_data,
             patient_data = patient_data,
             crude_rates = crude_rates,
             model_specs = current_spec,
-            mc.cores = n.cores
+            mc.cores = n.cores,
+            require_se = require_se
           )
         }, timeout = current_timeout * 60)
         
@@ -969,7 +924,619 @@ retry_failed_models <- function(failed_results,
   return(final_data)
 }
 
+### Multivariable model --------------------------------------------------
+
+# Forward selection for MSM models with parallel processing
+forward_selection_msm <- function(patient_data,
+                                  crude_rates,
+                                  univar_model_summary,  # univar_comp$model_summary dataframe
+                                  candidate_vars,  # Pool of variables to consider
+                                  spline_vars = NULL,
+                                  spline_df = 3,
+                                  spline_type = "ns",
+                                  model_structures = NULL,
+                                  constraint = "transition_specific",
+                                  mc.cores = min(8, parallel::detectCores() - 1),
+                                  timeout_minutes = 30,
+                                  save_prefix = "forward_selection",
+                                  verbose = TRUE) {
+  
+  library(dplyr)
+  library(parallel)
+  library(msm)
+  
+  # Validate input
+  if (!is.data.frame(univar_model_summary)) {
+    stop("univar_model_summary must be a data frame")
+  }
+  
+  required_cols <- c("model_structure", "formula", "AIC", "status")
+  missing_cols <- setdiff(required_cols, names(univar_model_summary))
+  if (length(missing_cols) > 0) {
+    stop("Missing required columns in univar_model_summary: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  # Determine which model structures to use
+  if (is.null(model_structures)) {
+    model_structures <- unique(univar_model_summary$model_structure)
+    if (verbose) cat("Using all available model structures:", paste(model_structures, collapse = ", "), "\n")
+  }
+  
+  # Initialize results storage
+  selection_history <- list()
+  current_models <- list()
+  all_fitted_models <- list()
+  
+  # Extract best univariate models as starting point
+  if (verbose) cat("\n=== INITIALIZING FROM BEST UNIVARIATE MODELS ===\n")
+  
+  for (structure in model_structures) {
+    # Filter to converged models for this structure
+    structure_summary <- univar_model_summary %>%
+      filter(model_structure == !!structure, 
+             status == "converged",
+             !is.na(AIC)) %>%
+      arrange(AIC)
+    
+    if (nrow(structure_summary) > 0) {
+      # Get best model info
+      best_model_info <- structure_summary[1, ]
+      best_model_formula <- best_model_info$formula
+      best_aic <- best_model_info$AIC
+      
+      # Extract covariates from formula
+      current_vars <- extract_covariates_from_formula(best_model_formula)
+      
+      current_models[[structure]] <- list(
+        variables = current_vars,
+        aic = best_aic,
+        model_name = best_model_formula,
+        formula = best_model_formula
+      )
+      
+      if (verbose) {
+        cat("Structure", structure, "- Starting with:", best_model_formula, 
+            "| Variables:", paste(current_vars, collapse = ", "),
+            "| AIC:", round(best_aic, 2), "\n")
+      }
+    } else {
+      if (verbose) {
+        cat("Structure", structure, "- No converged models found\n")
+      }
+    }
+  }
+  
+  if (length(current_models) == 0) {
+    stop("No valid converged univariate models found to start forward selection")
+  }
+  
+  # Store initial step
+  step_0 <- data.frame(
+    step = 0,
+    model_structure = names(current_models),
+    variables_added = sapply(current_models, function(x) paste(x$variables, collapse = "+")),
+    aic = sapply(current_models, function(x) x$aic),
+    model_name = sapply(current_models, function(x) x$model_name),
+    stringsAsFactors = FALSE
+  )
+  selection_history[["step_0"]] <- step_0
+  
+  # Main forward selection loop
+  step <- 1
+  continue_selection <- TRUE
+  
+  while (continue_selection) {
+    if (verbose) cat("\n=== FORWARD SELECTION STEP", step, "===\n")
+    
+    step_improvements <- list()
+    step_fitted_models <- list()
+    
+    # For each current model structure
+    for (structure in names(current_models)) {
+      current_model_info <- current_models[[structure]]
+      current_vars <- current_model_info$variables
+      current_aic <- current_model_info$aic
+      
+      # Find remaining candidate variables
+      remaining_vars <- setdiff(candidate_vars, current_vars)
+      
+      if (length(remaining_vars) == 0) {
+        if (verbose) cat("Structure", structure, "- No remaining variables to test\n")
+        next
+      }
+      
+      if (verbose) {
+        cat("Structure", structure, "- Testing", length(remaining_vars), "additional variables\n")
+        cat("  Current variables:", paste(current_vars, collapse = ", "), "\n")
+        cat("  Current AIC:", round(current_aic, 2), "\n")
+      }
+      
+      # Build model specs for this step
+      step_specs <- build_forward_step_specs(
+        current_vars = current_vars,
+        candidate_vars = remaining_vars,
+        spline_vars = spline_vars,
+        spline_df = spline_df,
+        spline_type = spline_type,
+        model_structure = structure,
+        constraint = constraint
+      )
+      
+      # Fit models in parallel for this structure
+      if (verbose) cat("  Fitting", nrow(step_specs), "candidate models...\n")
+      
+      step_results <- fit_forward_step_parallel(
+        model_specs = step_specs,
+        patient_data = patient_data,
+        crude_rates = crude_rates,
+        mc.cores = mc.cores,
+        timeout_minutes = timeout_minutes,
+        verbose = verbose
+      )
+      
+      # Store fitted models
+      structure_key <- paste0("step_", step, "_", structure)
+      step_fitted_models[[structure_key]] <- step_results$models
+      
+      # Find best improvement for this structure
+      if (length(step_results$models) > 0) {
+        aics <- sapply(step_results$models, function(x) {
+          if (inherits(x, "msm") && !is.null(x$minus2loglik)) {
+            return(x$minus2loglik + 2 * length(x$estimates))
+          } else {
+            return(Inf)
+          }
+        })
+        
+        best_idx <- which.min(aics)
+        best_aic <- aics[best_idx]
+        best_model_name <- names(step_results$models)[best_idx]
+        best_model <- step_results$models[[best_model_name]]
+        
+        # Check if this is an improvement
+        aic_improvement <- current_aic - best_aic
+        
+        if (best_aic < current_aic) {
+          # Get the spec for this model to extract the variables correctly
+          model_spec_idx <- which(step_specs$model_name == best_model_name)
+          if (length(model_spec_idx) > 0) {
+            best_spec <- step_specs[model_spec_idx[1], ]
+            new_vars <- best_spec$covariates[[1]]  # Get variables from the spec, NOT from model name
+            
+            added_var <- setdiff(new_vars, current_vars)
+            
+            # Handle case where multiple variables differ (shouldn't happen in forward selection)
+            if (length(added_var) == 1) {
+              added_variable <- added_var[1]
+            } else if (length(added_var) > 1) {
+              added_variable <- paste(added_var, collapse = "+")
+              warning("Multiple variables added in one step: ", added_variable)
+            } else {
+              added_variable <- "unknown"
+              warning("Could not determine added variable")
+            }
+            
+            step_improvements[[structure]] <- list(
+              variables = new_vars,
+              added_variable = added_variable,
+              aic = best_aic,
+              aic_improvement = aic_improvement,
+              model_name = best_model_name,
+              formula = paste("~", paste(new_vars, collapse = " + "))
+            )
+            
+            if (verbose) {
+              cat("  Best addition:", added_variable, "| New AIC:", round(best_aic, 2), 
+                  "| Improvement:", round(aic_improvement, 2), "\n")
+            }
+          } else {
+            if (verbose) cat("  Could not find model spec for best model\n")
+          }
+        } else {
+          if (verbose) cat("  No improvement found (best AIC:", round(best_aic, 2), ")\n")
+        }
+      } else {
+        if (verbose) cat("  No models converged\n")
+      }
+    }
+    
+    # Store all fitted models from this step
+    all_fitted_models <- c(all_fitted_models, step_fitted_models)
+    
+    # Update current models with improvements
+    any_improvements <- FALSE
+    step_summary <- data.frame(
+      step = integer(),
+      model_structure = character(),
+      variables_added = character(),
+      added_variable = character(),
+      aic = numeric(),
+      aic_improvement = numeric(),
+      model_name = character(),
+      stringsAsFactors = FALSE
+    )
+    
+    for (structure in names(current_models)) {
+      if (structure %in% names(step_improvements)) {
+        # Update with improved model
+        improvement <- step_improvements[[structure]]
+        current_models[[structure]] <- improvement
+        any_improvements <- TRUE
+        
+        step_summary <- rbind(step_summary, data.frame(
+          step = step,
+          model_structure = structure,
+          variables_added = paste(improvement$variables, collapse = "+"),
+          added_variable = improvement$added_variable,
+          aic = improvement$aic,
+          aic_improvement = improvement$aic_improvement,
+          model_name = improvement$model_name,
+          stringsAsFactors = FALSE
+        ))
+      } else {
+        # No improvement, keep current model
+        current_info <- current_models[[structure]]
+        step_summary <- rbind(step_summary, data.frame(
+          step = step,
+          model_structure = structure,
+          variables_added = paste(current_info$variables, collapse = "+"),
+          added_variable = NA_character_,
+          aic = current_info$aic,
+          aic_improvement = 0,
+          model_name = current_info$model_name,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+    
+    selection_history[[paste0("step_", step)]] <- step_summary
+    
+    # Check stopping criteria
+    if (!any_improvements) {
+      if (verbose) cat("\nNo improvements found. Stopping forward selection.\n")
+      continue_selection <- FALSE
+    } else {
+      if (verbose) {
+        cat("Step", step, "summary:\n")
+        improvement_summary <- step_summary %>% 
+          filter(!is.na(added_variable)) %>%
+          select(model_structure, added_variable, aic, aic_improvement)
+        if (nrow(improvement_summary) > 0) {
+          print(improvement_summary)
+        } else {
+          cat("  No improvements found\n")
+        }
+        
+        # Debug: Print current state
+        for (structure in names(current_models)) {
+          model_info <- current_models[[structure]]
+          cat("  Current state for", structure, ":\n")
+          cat("    Variables:", paste(model_info$variables, collapse = ", "), "\n")
+          cat("    AIC:", round(model_info$aic, 2), "\n")
+        }
+      }
+      step <- step + 1
+    }
+    
+    # Safety check to prevent infinite loops
+    if (step > length(candidate_vars)) {
+      if (verbose) cat("\nReached maximum possible steps. Stopping.\n")
+      continue_selection <- FALSE
+    }
+  }
+  
+  # Combine selection history
+  final_history <- do.call(rbind, selection_history)
+  rownames(final_history) <- NULL
+  
+  # Extract final models - note: these are just the specifications, not fitted models
+  final_models_specs <- list()
+  for (structure in names(current_models)) {
+    final_models_specs[[structure]] <- current_models[[structure]]
+  }
+  
+  # Save results
+  if (!is.null(save_prefix)) {
+    saveRDS(list(
+      final_models_specs = final_models_specs,
+      selection_history = final_history,
+      all_fitted_models = all_fitted_models,
+      metadata = list(
+        candidate_vars = candidate_vars,
+        spline_vars = spline_vars,
+        model_structures = model_structures,
+        constraint = constraint,
+        mc.cores = mc.cores,
+        timeout_minutes = timeout_minutes,
+        completed_steps = step - 1,
+        run_time = Sys.time()
+      )
+    ), file = paste0(save_prefix, "_results.rds"))
+    
+    if (verbose) cat("\nSaved results to:", paste0(save_prefix, "_results.rds"), "\n")
+  }
+  
+  if (verbose) {
+    cat("\n=== FORWARD SELECTION COMPLETE ===\n")
+    cat("Total steps completed:", step - 1, "\n")
+    cat("Final models:\n")
+    for (structure in names(current_models)) {
+      model_info <- current_models[[structure]]
+      cat("  ", structure, ":", paste(model_info$variables, collapse = " + "), 
+          "| AIC:", round(model_info$aic, 2), "\n")
+    }
+  }
+  
+  return(list(
+    final_models_specs = final_models_specs,
+    selection_history = final_history,
+    all_fitted_models = all_fitted_models,
+    metadata = list(
+      candidate_vars = candidate_vars,
+      spline_vars = spline_vars, 
+      model_structures = model_structures,
+      constraint = constraint,
+      mc.cores = mc.cores,
+      timeout_minutes = timeout_minutes,
+      completed_steps = step - 1
+    )
+  ))
+}
+
+# Helper function to extract covariates from formula
+extract_covariates_from_formula <- function(formula_string) {
+  # Parse formula to extract variables
+  # Expecting format like "~ age", "~ age_ns1 + age_ns2 + age_ns3", "~ age + gender"
+  
+  # Handle special cases first
+  if (formula_string == "~ 1" || formula_string == "" || is.na(formula_string)) {
+    return(character(0))
+  }
+  
+  # Parse the formula to get all terms
+  all_terms <- tryCatch({
+    all.vars(as.formula(formula_string))
+  }, error = function(e) {
+    # Fallback: manually parse the string
+    terms_part <- sub("^~\\s*", "", formula_string)
+    terms_split <- strsplit(terms_part, "\\s*\\+\\s*")[[1]]
+    return(trimws(terms_split))
+  })
+  
+  if (length(all_terms) == 0) {
+    return(character(0))
+  }
+  
+  # Extract base variable names by removing spline suffixes
+  base_vars <- unique(sapply(all_terms, function(term) {
+    # Remove spline term suffixes like "_ns1", "_ns2", "_bs1", etc.
+    base_var <- gsub("_(ns|bs)\\d+$", "", term)
+    # Remove other common suffixes
+    base_var <- gsub("_spline\\d*$", "", base_var)
+    base_var <- gsub("_quad$", "", base_var)
+    return(base_var)
+  }))
+  
+  return(base_vars)
+}
+
+# Helper function to build model specs for forward step
+build_forward_step_specs <- function(current_vars, candidate_vars, spline_vars, 
+                                     spline_df, spline_type, model_structure,
+                                     constraint) {
+  
+  specs <- data.frame(
+    model_name = character(),
+    model_structure = character(),
+    covariates = I(list()),
+    spline_vars = I(list()),
+    spline_df = numeric(),
+    spline_type = character(),
+    constraint = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (new_var in candidate_vars) {
+    # Create new variable set
+    new_vars <- c(current_vars, new_var)
+    
+    # Determine if new variable should be splined
+    if (new_var %in% spline_vars) {
+      new_spline_vars <- intersect(new_vars, spline_vars)
+      model_name <- paste(c(model_structure, new_vars, "spline"), collapse = "_")
+    } else {
+      new_spline_vars <- intersect(current_vars, spline_vars)  # Keep existing splines
+      model_name <- paste(c(model_structure, new_vars), collapse = "_")
+    }
+    
+    specs <- rbind(specs, data.frame(
+      model_name = model_name,
+      model_structure = model_structure,
+      covariates = I(list(new_vars)),
+      spline_vars = I(list(new_spline_vars)),
+      spline_df = spline_df,
+      spline_type = spline_type,
+      constraint = constraint,
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  return(specs)
+}
+
+# Helper function to fit models in parallel for one step
+fit_forward_step_parallel <- function(model_specs, patient_data, crude_rates,
+                                      mc.cores, timeout_minutes, verbose = FALSE) {
+  
+  # Fit function for single model spec (similar to your existing pattern)
+  fit_single_forward_spec <- function(spec_idx) {
+    spec <- model_specs[spec_idx, ]
+    
+    tryCatch({
+      # Set timeout
+      setTimeLimit(cpu = timeout_minutes * 60, elapsed = timeout_minutes * 60, 
+                   transient = TRUE)
+      
+      start_time <- Sys.time()
+      
+      # Get model data and crude rates
+      model_data <- subset(patient_data, model == spec$model_structure)
+      crude_rate <- crude_rates[[spec$model_structure]]
+      
+      # Extract variables for this spec
+      new_vars <- spec$covariates[[1]]
+      new_spline_vars <- spec$spline_vars[[1]]
+      
+      # Build formula using your existing approach
+      spec_result <- build_model_specifications(
+        new_vars, new_spline_vars, spec$spline_df, spec$spline_type,
+        NULL, NULL, NULL,  # Remove time_varying parameters
+        setNames(list(model_data), spec$model_structure)
+      )
+      
+      model_spec <- spec_result$specs[["main"]]
+      processed_data <- spec_result$processed_data_list[[spec$model_structure]]
+      
+      # Create formula
+      formula_name <- create_formula_name(model_spec$final_covariates)
+      covariate_formula <- if (length(model_spec$final_covariates) > 0) {
+        as.formula(formula_name)
+      } else {
+        NULL
+      }
+      
+      # Handle constraints
+      qmat <- crude_rate$qmat
+      n_transitions <- sum(qmat != 0 & row(qmat) != col(qmat))
+      
+      constraint_for_msm <- create_constraint_specification(
+        model_spec$final_covariates, spec$constraint, n_transitions, processed_data
+      )
+      
+      # Fit MSM model using your existing approach
+      fitted_model_result <- try_multiple_optimizations(
+        processed_data, crude_rate, covariate_formula, constraint_for_msm
+      )
+      
+      fitted_model <- fitted_model_result$model
+      
+      runtime <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+      
+      setTimeLimit(cpu = Inf, elapsed = Inf, transient = FALSE)
+      
+      return(list(
+        model_name = spec$model_name,
+        result = fitted_model,
+        runtime = runtime,
+        error = NULL
+      ))
+      
+    }, error = function(e) {
+      setTimeLimit(cpu = Inf, elapsed = Inf, transient = FALSE)
+      return(list(
+        model_name = spec$model_name,
+        result = NULL,
+        runtime = timeout_minutes * 60,
+        error = as.character(e)
+      ))
+    })
+  }
+  
+  # Run in parallel
+  fitted_results <- mclapply(
+    seq_len(nrow(model_specs)),
+    fit_single_forward_spec,
+    mc.cores = mc.cores
+  )
+  
+  # Organize results
+  fitted_models <- list()
+  for (result in fitted_results) {
+    if (is.null(result$error) && inherits(result$result, "msm")) {
+      fitted_models[[result$model_name]] <- result$result
+    } else if (verbose && !is.null(result$error)) {
+      cat("    Failed:", result$model_name, "-", result$error, "\n")
+    }
+  }
+  
+  return(list(
+    models = fitted_models,
+    all_results = fitted_results
+  ))
+}
+
 ## Time-varying models -------------------------------------------------------------
+
+# run_all_time_models <- function(patient_data,
+#                                 crude_rates,
+#                                 covariates = NULL,
+#                                 spline_vars = NULL,
+#                                 spline_df = 3,
+#                                 spline_type = "ns",
+#                                 time_breakpoints = NULL,
+#                                 time_spline_df = 3,
+#                                 constraint = "transition_specific",
+#                                 mc.cores = min(8, parallel::detectCores() - 1)) {
+#   
+#   # Define the time-varying types and time variables to loop over
+#   time_varying_options <- c(
+#     "linear", 
+#     # "piecewise",
+#     "spline"
+#     )
+#   time_variables <- c(
+#     "DaysSinceEntry", 
+#     "CalendarTime"
+#     )
+#   
+#   # Initialize a list to store results
+#   results <- list()
+#   
+#   # Loop through each time variable
+#   for (time_var in time_variables) {
+#     
+#     # Create a sublist for each time variable
+#     results[[time_var]] <- list()
+#     
+#     # Loop through each time-varying specification
+#     for (tv_type in time_varying_options) {
+#       
+#       # Optional: message for progress
+#       message(paste("Fitting model with time variable =", time_var, 
+#                     "and time-varying type =", tv_type))
+#       
+#       # Fit the model
+#       model_result <- fit_msm_models(
+#         patient_data = patient_data,
+#         crude_rates = crude_rates,
+#         
+#         # Covariate specifications
+#         covariates = covariates,
+#         spline_vars = spline_vars,
+#         spline_df = spline_df,
+#         spline_type = spline_type,
+#         
+#         # Time-varying specs
+#         time_varying = tv_type,
+#         time_variable = time_var,
+#         time_breakpoints = time_breakpoints,
+#         time_spline_df = time_spline_df,
+#         
+#         # Constraint options
+#         constraint = constraint,
+#         
+#         # Processing
+#         mc.cores = mc.cores
+#       )
+#       
+#       # Store in the results list
+#       results[[time_var]][[tv_type]] <- model_result
+#     }
+#   }
+#   
+#   return(results)
+# }
+# 
 
 run_all_time_models <- function(patient_data,
                                 crude_rates,
@@ -982,56 +1549,47 @@ run_all_time_models <- function(patient_data,
                                 constraint = "transition_specific",
                                 mc.cores = min(8, parallel::detectCores() - 1)) {
   
-  # Define the time-varying types and time variables to loop over
-  time_varying_options <- c("linear", "spline", "piecewise")
+  # Get unique model structures from patient_data
+  model_structures <- unique(patient_data$model)
+  
+  # Define time-varying options
+  time_varying_options <- c("linear", "spline")
   time_variables <- c("DaysSinceEntry", "CalendarTime")
   
-  # Initialize a list to store results
-  results <- list()
+  # Create model_specs data frame with all combinations
+  model_specs <- expand.grid(
+    model_structure = model_structures,
+    time_variable = time_variables,
+    time_varying = time_varying_options,
+    stringsAsFactors = FALSE
+  )
   
-  # Loop through each time variable
-  for (time_var in time_variables) {
-    
-    # Create a sublist for each time variable
-    results[[time_var]] <- list()
-    
-    # Loop through each time-varying specification
-    for (tv_type in time_varying_options) {
-      
-      # Optional: message for progress
-      message(paste("Fitting model with time variable =", time_var, 
-                    "and time-varying type =", tv_type))
-      
-      # Fit the model
-      model_result <- fit_msm_models(
-        patient_data = patient_data,
-        crude_rates = crude_rates,
-        
-        # Covariate specifications
-        covariates = covariates,
-        spline_vars = spline_vars,
-        spline_df = spline_df,
-        spline_type = spline_type,
-        
-        # Time-varying specs
-        time_varying = tv_type,
-        time_variable = time_var,
-        time_breakpoints = time_breakpoints,
-        time_spline_df = time_spline_df,
-        
-        # Constraint options
-        constraint = constraint,
-        
-        # Processing
-        mc.cores = mc.cores
-      )
-      
-      # Store in the results list
-      results[[time_var]][[tv_type]] <- model_result
-    }
-  }
+  # Create unique model names
+  model_specs$model_name <- paste(
+    model_specs$model_structure,
+    model_specs$time_variable,
+    model_specs$time_varying,
+    sep = "_"
+  )
   
-  return(results)
+  # Add other specification columns
+  model_specs$covariates <- list(covariates)
+  model_specs$spline_vars <- list(spline_vars)
+  model_specs$spline_df <- spline_df
+  model_specs$spline_type <- spline_type
+  model_specs$time_breakpoints <- list(time_breakpoints)
+  model_specs$time_spline_df <- time_spline_df
+  model_specs$constraint <- constraint
+  
+  # Fit all models
+  fitted_models <- fit_msm_models(
+    patient_data = patient_data,
+    crude_rates = crude_rates,
+    model_specs = model_specs,
+    mc.cores = mc.cores
+  )
+  
+  return(fitted_models)
 }
 
 
@@ -1161,6 +1719,34 @@ run_cv_section <- function(section_name, models, cv_config) {
 }
 
 ## Helper functions for model fitting ----------------------------------------------
+
+calc_crude_init_rates <- function(patient_data, qmat_list) {
+  
+  crude_results <- list()
+  for (modelname in unique(patient_data$model)) {
+    
+    model_data <- patient_data[which(patient_data$model == modelname),]
+    qmat <- qmat_list[[modelname]]
+    
+    crude_result <- tryCatch({
+      crudeinits.msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, qmatrix = qmat)
+    }, error = function(e) {
+      warning(paste("Error calculating crude rates for", modelname, ":", e$message))
+      return(NULL)
+    })
+    
+    # Save the crude rates and the model name
+    if (!is.null(crude_result)) {
+      crude_results[[modelname]] <- list(
+        qmat = crude_result,
+        modelname = modelname
+      )
+    }
+  }
+  
+  return(crude_results)
+}
+
 
 # Helper function to preprocess data for time-varying models
 preprocess_time_varying_data <- function(patient_data, time_varying, time_variable, time_breakpoints) {
@@ -1380,22 +1966,45 @@ create_constraint_specification <- function(covariates, constraint, n_transition
 }
 
 # Helper function to try multiple optimization methods
-try_multiple_optimizations <- function(model_data, crude_result, covariate_formula, constraint_for_msm) {
+try_multiple_optimizations <- function(model_data, crude_result, covariate_formula, constraint_for_msm, require_se = TRUE) {
   
+  # Define optimization methods with different strategies
   optimization_methods <- list(
-    list(opt_method = "optim", method = "BFGS", name = "BFGS"),
-    list(opt_method = "bobyqa", name = "BOBYQA"),
-    list(opt_method = "optim", method = "Nelder-Mead", name = "Nelder-Mead")
+    # First round - standard settings
+    list(opt_method = "optim", name = "BFGS_standard", maxit = 20000, fnscale = 10000),
+    list(opt_method = "bobyqa", name = "BOBYQA_standard", maxit = 20000, fnscale = 10000),
+    
+    # Second round - higher fnscale (more aggressive scaling)
+    list(opt_method = "optim", name = "BFGS_highscale", maxit = 50000, fnscale = 50000),
+    list(opt_method = "bobyqa", name = "BOBYQA_highscale", maxit = 50000, fnscale = 50000),
+    
+    # Third round - lower fnscale (more conservative)
+    list(opt_method = "optim", name = "BFGS_lowscale", maxit = 50000, fnscale = 1000),
+    list(opt_method = "bobyqa", name = "BOBYQA_lowscale", maxit = 50000, fnscale = 1000),
+    
+    # Fourth round - very high iterations
+    list(opt_method = "optim", name = "BFGS_100k", maxit = 100000, fnscale = 10000),
+    list(opt_method = "bobyqa", name = "BOBYQA_100k", maxit = 100000, fnscale = 10000),
+    
+    # Fifth round - extreme settings
+    list(opt_method = "optim", name = "BFGS_200k", maxit = 200000, fnscale = 50000),
+    list(opt_method = "bobyqa", name = "BOBYQA_200k", maxit = 200000, fnscale = 50000)
   )
   
   for (opt_config in optimization_methods) {
     fitted_model <- tryCatch({
-      control_list <- list(fnscale = 10000, maxit = 20000, reltol = 1e-10)
-      
-      if (opt_config$opt_method == "optim" && 
-          "method" %in% names(opt_config) && 
-          !is.null(opt_config$method)) {
-        control_list$method <- opt_config$method
+      if (opt_config$opt_method == "nlm") {
+        # NLM uses different control structure
+        control_list <- list(
+          stepmax = 10,
+          ndigit = 10
+        )
+      } else {
+        control_list <- list(
+          fnscale = opt_config$fnscale,
+          maxit = opt_config$maxit,
+          reltol = 1e-10
+        )
       }
       
       msm_args <- list(
@@ -1419,14 +2028,62 @@ try_multiple_optimizations <- function(model_data, crude_result, covariate_formu
       
       # Check convergence
       converged <- is.null(result$opt$convergence) || result$opt$convergence == 0
-      if (converged) {
-        return(list(model = result, method = opt_config$name, error = NULL))
+      
+      # Check for standard errors
+      has_se <- !is.null(result$foundse) && result$foundse == TRUE
+      
+      # Check if Hessian is positive definite
+      hessian_ok <- TRUE
+      if (!is.null(result$opt$hessian)) {
+        hessian_check <- tryCatch({
+          eigen_vals <- eigen(result$opt$hessian, symmetric = TRUE, only.values = TRUE)$values
+          all(eigen_vals > 1e-8)  # Allow small negative eigenvalues due to numerical precision
+        }, error = function(e) FALSE)
+        hessian_ok <- hessian_check
+      }
+      
+      # More lenient acceptance criteria - accept if has SEs even if hessian check fails
+      if (converged && has_se) {
+        message("Method ", opt_config$name, " succeeded! (maxit=", opt_config$maxit, 
+                ", fnscale=", opt_config$fnscale, ", hessian_ok=", hessian_ok, ")")
+        return(list(
+          model = result, 
+          method = opt_config$name, 
+          error = NULL,
+          has_se = has_se,
+          maxit_used = opt_config$maxit,
+          fnscale_used = opt_config$fnscale,
+          hessian_positive_definite = hessian_ok
+        ))
+      } else if (converged && !has_se && !require_se) {
+        # Accept without SEs if not required
+        message("Method ", opt_config$name, " converged without SEs (maxit=", opt_config$maxit, ")")
+        return(list(
+          model = result, 
+          method = opt_config$name, 
+          error = NULL,
+          has_se = has_se,
+          maxit_used = opt_config$maxit,
+          fnscale_used = opt_config$fnscale,
+          hessian_positive_definite = hessian_ok
+        ))
       } else {
-        NULL  # Try next method
+        # Log why it failed
+        fail_reason <- if (!converged) {
+          "not converged"
+        } else if (!has_se && require_se) {
+          "no SEs"
+        } else {
+          "hessian not positive definite"
+        }
+        message("Method ", opt_config$name, " failed: ", fail_reason, 
+                " (maxit=", opt_config$maxit, ", fnscale=", opt_config$fnscale, ")")
+        NULL
       }
       
     }, error = function(e) {
-      NULL  # Try next method
+      message("Method ", opt_config$name, " threw error: ", e$message)
+      NULL
     })
     
     if (!is.null(fitted_model)) {
@@ -1435,7 +2092,16 @@ try_multiple_optimizations <- function(model_data, crude_result, covariate_formu
   }
   
   # If all methods failed
-  return(list(model = NULL, method = "all_failed", error = "All optimization methods failed"))
+  return(list(
+    model = NULL, 
+    method = "all_failed", 
+    error = if (require_se) {
+      "All optimization methods failed or did not produce standard errors"
+    } else {
+      "All optimization methods failed"
+    },
+    has_se = FALSE
+  ))
 }
 
 # Helper function to create comprehensive metadata
@@ -1475,6 +2141,17 @@ create_model_metadata <- function(spec, covariates, spline_vars, spline_df, spli
       } else if (time_varying == "spline") {
         config$spline_df <- time_spline_df
         config$spline_type <- spline_type
+        
+        if (!is.null(spec$spline_metadata[[time_variable]])) {
+          config$knots <- spec$spline_metadata[[time_variable]]$knots
+          config$boundary_knots <- spec$spline_metadata[[time_variable]]$boundary_knots
+          config$var_range <- spec$spline_metadata[[time_variable]]$var_range
+        } else {
+          config$knots <- NA
+          config$boundary_knots <- NA
+          config$var_range <- NA
+        }
+        
       }
       config
     } else NULL,

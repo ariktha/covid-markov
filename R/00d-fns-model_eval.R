@@ -105,7 +105,9 @@ tidy_msm_models <- function(fitted_msm_models) {
         loglik <- fitted_model$minus2loglik / -2
         aic <- fitted_model$minus2loglik + 2 * length(fitted_model$estimates)
         bic <- calc_bic_msm(fitted_model)
-        n_params <- fitted_model$paramdata$npars
+        n_tot_params <- fitted_model$paramdata$npars
+        n_dup_params <- fitted_model$paramdata$ndup
+        n_params <- n_tot_params - n_dup_params
         n_obs <- length(unique(fitted_model[["data"]][["mf"]][["(subject)"]]))
         n_abs_states <- length(absorbing.msm(fitted_model))
         n_trans_states <- length(transient.msm(fitted_model))
@@ -123,6 +125,8 @@ tidy_msm_models <- function(fitted_msm_models) {
           loglik = loglik,
           AIC = aic,
           BIC = bic,
+          n_tot_params = n_tot_params,
+          n_dup_params = n_dup_params,
           n_params = n_params,
           n_obs = n_obs,
           n_states = n_states,
@@ -153,6 +157,8 @@ tidy_msm_models <- function(fitted_msm_models) {
           loglik = NA_real_,
           AIC = NA_real_,
           BIC = NA_real_,
+          n_tot_params = NA_integer_,
+          n_dup_params = NA_integer_,
           n_params = NA_integer_,
           n_obs = NA_integer_,
           n_states = NA_integer_,
@@ -363,6 +369,8 @@ tidy_msm_sojourns <- function(fitted_msm_models,
                               covariates_list = NULL,
                               ci_method = c("normal", "delta", "bootstrap", "none")) {
   
+  ci_method <- match.arg(ci_method)
+  
   validate_model_structure(fitted_msm_models)
   tidied_sojourns <- data.frame()
   
@@ -456,6 +464,229 @@ tidy_msm_sojourns <- function(fitted_msm_models,
   return(tidied_sojourns)
 }
 
+### Expected visits -------------------------------------------------
+
+#' Calculate expected number of visits to each state in tidy format
+#'
+#' Wrapper around msm::envisits.msm that returns results in tidy format
+#' consistent with other tidy_msm_* functions
+#'
+#' @param fitted_model A fitted msm model object
+#' @param patient_data The patient data used to fit the model (for averaging covariates)
+#' @param ci_method Method for confidence intervals: "normal" (delta method) or "none"
+#' @return A tidy data frame with expected visits from each starting state to each state
+#' @export
+tidy_msm_envisits <- function(fitted_model, 
+                              patient_data = NULL,
+                              ci_method = "normal") {
+  
+  # Check if msm package is available
+  if (!requireNamespace("msm", quietly = TRUE)) {
+    stop("msm package is required")
+  }
+  
+  # Validate ci_method
+  if (!ci_method %in% c("normal", "none")) {
+    stop("ci_method must be 'normal' or 'none'")
+  }
+  
+  # Calculate mean values for covariates if they exist
+  covariates_list <- NULL
+  
+  if (!is.null(patient_data) && !is.null(fitted_model$covariates)) {
+    covariate_means <- list()
+    
+    for (cov_name in names(fitted_model$covariates)) {
+      # Skip spline terms - they'll be handled via the original variables
+      if (grepl("^ns\\(|^bs\\(", cov_name)) {
+        next
+      }
+      
+      if (cov_name %in% names(patient_data)) {
+        if (is.numeric(patient_data[[cov_name]])) {
+          covariate_means[[cov_name]] <- mean(patient_data[[cov_name]], na.rm = TRUE)
+        } else if (is.factor(patient_data[[cov_name]])) {
+          # For factors, use the most common level
+          covariate_means[[cov_name]] <- names(sort(table(patient_data[[cov_name]]), 
+                                                    decreasing = TRUE))[1]
+        }
+      }
+    }
+    
+    if (length(covariate_means) > 0) {
+      covariates_list <- covariate_means
+    }
+  }
+  
+  # Calculate expected visits using msm's built-in function
+  # This returns a matrix with states as columns
+  if (!is.null(covariates_list)) {
+    envisits_result <- msm::envisits.msm(fitted_model, 
+                                         covariates = covariates_list,
+                                         ci = ci_method)
+  } else {
+    envisits_result <- msm::envisits.msm(fitted_model, 
+                                         ci = ci_method)
+  }
+  
+  # Extract state names (columns are destination states)
+  state_names <- colnames(envisits_result)
+  n_states <- length(state_names)
+  
+  # envisits.msm returns expected visits TO each state (averaged over starting states)
+  # NOT from each starting state to each state
+  # So we need a different structure
+  
+  visits_tidy <- data.frame(
+    to_state = state_names,
+    expected_visits = envisits_result["res", ],
+    stringsAsFactors = FALSE
+  )
+  
+  # Extract confidence intervals if they were calculated
+  if (ci_method != "none" && "2.5%" %in% rownames(envisits_result)) {
+    visits_tidy$lower_ci <- envisits_result["2.5%", ]
+    visits_tidy$upper_ci <- envisits_result["97.5%", ]
+  } else {
+    visits_tidy$lower_ci <- NA
+    visits_tidy$upper_ci <- NA
+  }
+  
+  # Identify absorbing states
+  Q <- if (!is.null(covariates_list)) {
+    msm::qmatrix.msm(fitted_model, covariates = covariates_list)
+  } else {
+    fitted_model$Qmatrices$baseline
+  }
+  
+  is_absorbing <- apply(Q, 1, function(row) {
+    all(row[row(Q) != col(Q)] == 0)
+  })
+  
+  visits_tidy$is_absorbing <- is_absorbing[match(visits_tidy$to_state, state_names)]
+  
+  # Round for readability
+  visits_tidy$expected_visits <- round(visits_tidy$expected_visits, 4)
+  if (!all(is.na(visits_tidy$lower_ci))) {
+    visits_tidy$lower_ci <- round(visits_tidy$lower_ci, 4)
+    visits_tidy$upper_ci <- round(visits_tidy$upper_ci, 4)
+  }
+  
+  # Reorder columns
+  visits_tidy <- visits_tidy[, c("to_state", "expected_visits", 
+                                 "lower_ci", "upper_ci", 
+                                 "is_absorbing")]
+  
+  # Convert to tibble if available
+  if (requireNamespace("dplyr", quietly = TRUE)) {
+    visits_tidy <- dplyr::as_tibble(visits_tidy)
+  }
+  
+  return(visits_tidy)
+}
+
+
+#' Calculate expected visits for all models in a fitted results object
+#'
+#' @param fitted_results Results object from fit_msm_models() or fit_univariate_models()
+#' @param patient_data The patient data (required for covariate averaging)
+#' @param ci_method Method for confidence intervals: "normal" (delta method) or "none"
+#' @param mc.cores Number of cores for parallel processing
+#' @return A tidy data frame with expected visits for all models
+#' @export
+tidy_msm_envisits_all <- function(fitted_results,
+                                  patient_data,
+                                  ci_method = "normal",
+                                  mc.cores = 1) {
+  
+  if (!requireNamespace("parallel", quietly = TRUE)) {
+    mc.cores <- 1
+  }
+  
+  # Extract models from results structure
+  all_models <- list()
+  
+  if ("models" %in% names(fitted_results)) {
+    # Structure from fit_msm_models or fit_univariate_models
+    for (model_name in names(fitted_results$models)) {
+      for (formula_name in names(fitted_results$models[[model_name]])) {
+        model_entry <- fitted_results$models[[model_name]][[formula_name]]
+        
+        if (!is.null(model_entry$fitted_model) && 
+            model_entry$status == "converged") {
+          all_models[[paste(model_name, formula_name, sep = "___")]] <- list(
+            fitted_model = model_entry$fitted_model,
+            model_name = model_name,
+            formula_name = formula_name,
+            model_structure = model_entry$metadata$model_structure
+          )
+        }
+      }
+    }
+  }
+  
+  if (length(all_models) == 0) {
+    stop("No converged models found in fitted_results")
+  }
+  
+  cat("Calculating expected visits for", length(all_models), "models\n")
+  
+  # Function to process a single model
+  process_model <- function(model_info) {
+    tryCatch({
+      # Filter patient data to relevant model structure
+      model_data <- patient_data[patient_data$model == model_info$model_structure, ]
+      
+      visits <- tidy_msm_envisits(
+        fitted_model = model_info$fitted_model,
+        patient_data = model_data,
+        ci_method = ci_method
+      )
+      
+      # Add model identifiers
+      visits$model_name <- model_info$model_name
+      visits$formula_name <- model_info$formula_name
+      visits$model_structure <- model_info$model_structure
+      
+      visits
+    }, error = function(e) {
+      warning(paste("Error calculating visits for", model_info$model_name, 
+                    model_info$formula_name, ":", e$message))
+      NULL
+    })
+  }
+  
+  # Process models (in parallel if requested)
+  if (mc.cores > 1) {
+    results_list <- parallel::mclapply(all_models, process_model, mc.cores = mc.cores)
+  } else {
+    results_list <- lapply(all_models, process_model)
+  }
+  
+  # Remove NULL results (failed models)
+  results_list <- Filter(Negate(is.null), results_list)
+  
+  # Combine into single data frame
+  if (length(results_list) > 0) {
+    combined_visits <- do.call(rbind, results_list)
+    
+    # Reorder columns
+    combined_visits <- combined_visits[, c("model_name", "formula_name", "model_structure",
+                                           "to_state", "expected_visits",
+                                           "lower_ci", "upper_ci",
+                                           "is_absorbing")]
+    
+    # Convert to tibble if available
+    if (requireNamespace("dplyr", quietly = TRUE)) {
+      combined_visits <- dplyr::as_tibble(combined_visits)
+    }
+    
+    return(combined_visits)
+  } else {
+    stop("Failed to calculate expected visits for any models")
+  }
+}
+
 ### Hazard ratios -----------------------------------------------------
 
 tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
@@ -513,7 +744,7 @@ tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
       base_variables <- extract_base_variables_from_metadata(metadata)
       
       model_tidy <- tryCatch({
-        hr_result <- hazard.msm(fitted_model, hazard.scale = hazard_scale)
+        hr_result <- hazard.msm(fitted_model, hazard.scale = hazard_scale, cl = 0.95)
         
         # Manual tidying of hazard ratios (list of matrices)
         hr_tidy_list <- map_dfr(names(hr_result), function(covariate_name) {
@@ -569,219 +800,6 @@ tidy_msm_hazards <- function(fitted_msm_models, hazard_scale = 1) {
   return(tidied_hrs)
 }
 
-#' Calculate hazard ratios for spline covariates relative to reference value
-#' @param fitted_msm_models Nested list from fit_msm_models
-#' @param patient_data Original patient data (to get variable ranges)
-#' @param n_points Number of evaluation points along each spline (default: 20)
-#' @param reference_level Named list of reference values, or NULL for median (default: NULL)
-#' @param ci_method Method for confidence intervals: "delta" or "normal" (default: "delta")
-#' @return Data frame with variable values, HRs, CIs, by transition and model
-calculate_spline_hazard_ratios <- function(fitted_msm_models,
-                                           patient_data,
-                                           n_points = 20,
-                                           reference_level = NULL,
-                                           ci_method = "delta") {
-  
-  # Validate inputs
-  validate_model_structure(fitted_msm_models)
-  
-  if (!ci_method %in% c("delta", "normal")) {
-    stop("ci_method must be 'delta' or 'normal'")
-  }
-  
-  cat("=== CALCULATING SPLINE HAZARD RATIOS ===\n")
-  
-  all_results <- list()
-  
-  # Loop through models
-  for (model_name in names(fitted_msm_models)) {
-    for (formula_name in names(fitted_msm_models[[model_name]])) {
-      
-      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
-      
-      # Skip failed models
-      if (is.null(model_entry) || 
-          (is.list(model_entry) && !is.null(model_entry$status) && 
-           model_entry$status == "failed")) {
-        next
-      }
-      
-      fitted_model <- model_entry$fitted_model
-      metadata <- model_entry$metadata
-      
-      if (is.null(fitted_model) || is.null(metadata)) next
-      
-      model_structure <- metadata$model_structure
-      
-      # Check if model has splines
-      if (!extract_has_splines_from_metadata(metadata)) {
-        next
-      }
-      
-      cat("Processing:", model_structure, "|", formula_name, "\n")
-      
-      # Get spline variables and metadata
-      spline_config <- metadata$spline_config
-      if (is.null(spline_config) || is.null(spline_config$spline_metadata)) {
-        next
-      }
-      
-      # Filter patient data for this model
-      model_data <- patient_data %>% filter(model == model_structure)
-      
-      # Process each spline variable
-      for (spline_var in names(spline_config$spline_metadata)) {
-        
-        var_meta <- spline_config$spline_metadata[[spline_var]]
-        
-        cat("  Variable:", spline_var, "\n")
-        
-        # Get variable range from data
-        var_values <- model_data[[spline_var]]
-        if (is.null(var_values) || all(is.na(var_values))) {
-          warning(paste("Variable", spline_var, "not found in data"))
-          next
-        }
-        
-        var_range <- range(var_values, na.rm = TRUE)
-        
-        # Set reference level
-        ref_value <- if (!is.null(reference_level) && spline_var %in% names(reference_level)) {
-          reference_level[[spline_var]]
-        } else {
-          median(var_values, na.rm = TRUE)
-        }
-        
-        cat("    Range: [", var_range[1], ",", var_range[2], "], Reference:", ref_value, "\n")
-        
-        # Create evaluation grid
-        eval_grid <- seq(var_range[1], var_range[2], length.out = n_points)
-        
-        # Get base variables (non-spline covariates to hold constant)
-        base_variables <- extract_base_variables_from_metadata(metadata)
-        other_vars <- setdiff(base_variables, spline_var)
-        
-        # Create covariate list for reference value
-        ref_covariates <- list()
-        ref_covariates[[spline_var]] <- ref_value
-        
-        # Set other covariates to their medians/modes
-        for (other_var in other_vars) {
-          if (other_var %in% names(model_data)) {
-            if (is.numeric(model_data[[other_var]])) {
-              ref_covariates[[other_var]] <- median(model_data[[other_var]], na.rm = TRUE)
-            } else {
-              # For factors, use most common level
-              ref_covariates[[other_var]] <- names(sort(table(model_data[[other_var]]), 
-                                                        decreasing = TRUE))[1]
-            }
-          }
-        }
-        
-        # Calculate hazard ratios at reference (should be ~1)
-        ref_hazards <- tryCatch({
-          hazard.msm(fitted_model, covariates = ref_covariates, 
-                     ci = ci_method, hazard.scale = 1)
-        }, error = function(e) {
-          warning(paste("Failed to calculate reference hazards:", e$message))
-          return(NULL)
-        })
-        
-        if (is.null(ref_hazards)) next
-        
-        # Calculate hazard ratios at each grid point
-        grid_results <- list()
-        
-        for (i in seq_along(eval_grid)) {
-          eval_value <- eval_grid[i]
-          
-          # Create covariate list for this evaluation point
-          eval_covariates <- ref_covariates
-          eval_covariates[[spline_var]] <- eval_value
-          
-          # Get hazards at this point
-          eval_hazards <- tryCatch({
-            hazard.msm(fitted_model, covariates = eval_covariates,
-                       ci = ci_method, hazard.scale = 1)
-          }, error = function(e) {
-            NULL
-          })
-          
-          if (is.null(eval_hazards)) next
-          
-          # Calculate HR relative to reference for each transition
-          for (cov_name in names(eval_hazards)) {
-            
-            # Get reference hazard for this covariate/transition
-            ref_hr <- ref_hazards[[cov_name]]
-            eval_hr <- eval_hazards[[cov_name]]
-            
-            # Extract transition info from covariate name
-            # Format is typically "variablename.transition" or just shows transition
-            transitions <- rownames(eval_hr)
-            
-            for (trans in transitions) {
-              
-              # Calculate HR relative to reference
-              # HR = exp(log(eval) - log(ref))
-              hr <- eval_hr[trans, "HR"] / ref_hr[trans, "HR"]
-              
-              # For CIs, use ratio of the HR bounds
-              hr_lower <- eval_hr[trans, "L"] / ref_hr[trans, "U"]
-              hr_upper <- eval_hr[trans, "U"] / ref_hr[trans, "L"]
-              
-              grid_results[[length(grid_results) + 1]] <- data.frame(
-                model_name = model_name,
-                model_structure = model_structure,
-                formula = formula_name,
-                spline_variable = spline_var,
-                variable_value = eval_value,
-                reference_value = ref_value,
-                transition = trans,
-                hazard_ratio = hr,
-                hr_lower = hr_lower,
-                hr_upper = hr_upper,
-                log_hr = log(hr),
-                log_hr_lower = log(hr_lower),
-                log_hr_upper = log(hr_upper),
-                stringsAsFactors = FALSE
-              )
-            }
-          }
-        }
-        
-        if (length(grid_results) > 0) {
-          var_results <- do.call(rbind, grid_results)
-          
-          # Add metadata
-          var_results$constraint_type <- extract_constraint_type_from_metadata(metadata)
-          var_results$spline_df <- var_meta$df
-          var_results$spline_type <- var_meta$type
-          
-          combo_key <- paste(model_structure, formula_name, spline_var, sep = "___")
-          all_results[[combo_key]] <- var_results
-        }
-      }
-    }
-  }
-  
-  if (length(all_results) == 0) {
-    warning("No spline hazard ratios calculated")
-    return(data.frame())
-  }
-  
-  # Combine all results
-  final_results <- do.call(rbind, all_results)
-  rownames(final_results) <- NULL
-  
-  cat("=== COMPLETED ===\n")
-  cat("Calculated HRs for", length(unique(final_results$spline_variable)), 
-      "spline variables\n")
-  cat("Across", length(unique(final_results$model_structure)), "model structures\n")
-  cat("Total rows:", nrow(final_results), "\n")
-  
-  return(final_results)
-}
 
 ### State prevalence --------------------------------------------------
 
@@ -1826,51 +1844,6 @@ calculate_auc_safe <- function(outcome, prediction) {
   }
 }
 
-extract_fitted_model <- function(fitted_models, model_name, formula, context = "") {
-  if (!model_name %in% names(fitted_models)) {
-    warning(paste("Model", model_name, "not found in fitted_models", context))
-    return(NULL)
-  }
-  
-  if (!formula %in% names(fitted_models[[model_name]])) {
-    warning(paste("Formula", formula, "not found in model", model_name, context))
-    return(NULL)
-  }
-  
-  model_entry <- fitted_models[[model_name]][[formula]]
-  
-  # Handle the new unified structure
-  if (!is.list(model_entry)) {
-    warning(paste("Invalid model name for", model_name, formula, 
-                  "- expected list with $fitted_model component", context))
-    return(NULL)
-  }
-  
-  if (!"fitted_model" %in% names(model_entry)) {
-    warning(paste("Missing fitted_model component for", model_name, formula, context))
-    return(NULL)
-  }
-  
-  # Check if model failed
-  if (!is.null(model_entry$status) && model_entry$status == "failed") {
-    warning(paste("Model failed for", model_name, formula, context))
-    return(NULL)
-  }
-  
-  # Additional check that the fitted_model is actually an msm object
-  fitted_model <- model_entry$fitted_model
-  if (is.null(fitted_model)) {
-    warning(paste("fitted_model is NULL for", model_name, formula, context))
-    return(NULL)
-  }
-  
-  if (!inherits(fitted_model, "msm")) {
-    warning(paste("fitted_model is not an msm object for", model_name, formula, context))
-    return(NULL)
-  }
-  
-  return(fitted_model)
-}
 
 validate_model_structure <- function(fitted_models) {
   if (!is.list(fitted_models) || length(fitted_models) == 0) {
@@ -1976,31 +1949,6 @@ summarize_model_structure <- function(fitted_models) {
   return(structure_summary)
 }
 
-# Helper function to extract all successfully fitted models
-extract_successful_models <- function(fitted_models) {
-  validate_model_structure(fitted_models)
-  
-  successful_models <- list()
-  
-  for (model_name in names(fitted_models)) {
-    successful_models[[model_name]] <- list()
-    
-    for (formula in names(fitted_models[[model_name]])) {
-      model_entry <- fitted_models[[model_name]][[formula]]
-      
-      if (model_entry$status == "converged" && !is.null(model_entry$fitted_model)) {
-        successful_models[[model_name]][[formula]] <- model_entry
-      }
-    }
-    
-    # Remove empty structures
-    if (length(successful_models[[model_name]]) == 0) {
-      successful_models[[model_name]] <- NULL
-    }
-  }
-  
-  return(successful_models)
-}
 
 state_name_to_num <- function(state_names, fitted_model) {
   if (is.null(fitted_model) || !inherits(fitted_model, "msm")) {
@@ -2072,6 +2020,79 @@ standardize_state_columns <- function(data, fitted_model, config = NULL) {
 
 
 ### Extract from metadata ------------------------------------------------
+
+extract_fitted_model <- function(fitted_models, model_name, formula, context = "") {
+  if (!model_name %in% names(fitted_models)) {
+    warning(paste("Model", model_name, "not found in fitted_models", context))
+    return(NULL)
+  }
+  
+  if (!formula %in% names(fitted_models[[model_name]])) {
+    warning(paste("Formula", formula, "not found in model", model_name, context))
+    return(NULL)
+  }
+  
+  model_entry <- fitted_models[[model_name]][[formula]]
+  
+  # Handle the new unified structure
+  if (!is.list(model_entry)) {
+    warning(paste("Invalid model name for", model_name, formula, 
+                  "- expected list with $fitted_model component", context))
+    return(NULL)
+  }
+  
+  if (!"fitted_model" %in% names(model_entry)) {
+    warning(paste("Missing fitted_model component for", model_name, formula, context))
+    return(NULL)
+  }
+  
+  # Check if model failed
+  if (!is.null(model_entry$status) && model_entry$status == "failed") {
+    warning(paste("Model failed for", model_name, formula, context))
+    return(NULL)
+  }
+  
+  # Additional check that the fitted_model is actually an msm object
+  fitted_model <- model_entry$fitted_model
+  if (is.null(fitted_model)) {
+    warning(paste("fitted_model is NULL for", model_name, formula, context))
+    return(NULL)
+  }
+  
+  if (!inherits(fitted_model, "msm")) {
+    warning(paste("fitted_model is not an msm object for", model_name, formula, context))
+    return(NULL)
+  }
+  
+  return(fitted_model)
+}
+
+# Helper function to extract all successfully fitted models
+extract_successful_models <- function(fitted_models) {
+  validate_model_structure(fitted_models)
+  
+  successful_models <- list()
+  
+  for (model_name in names(fitted_models)) {
+    successful_models[[model_name]] <- list()
+    
+    for (formula in names(fitted_models[[model_name]])) {
+      model_entry <- fitted_models[[model_name]][[formula]]
+      
+      if (model_entry$status == "converged" && !is.null(model_entry$fitted_model)) {
+        successful_models[[model_name]][[formula]] <- model_entry
+      }
+    }
+    
+    # Remove empty structures
+    if (length(successful_models[[model_name]]) == 0) {
+      successful_models[[model_name]] <- NULL
+    }
+  }
+  
+  return(successful_models)
+}
+
 
 # Helper functions to extract information from metadata
 extract_covariate_label_from_metadata <- function(metadata, formula_name) {
@@ -2164,6 +2185,520 @@ extract_constraint_type_from_metadata <- function(metadata) {
     return(metadata$constraint_config$type)
   }
   return(NA_character_)
+}
+
+### Covariate combinations extraction ----------
+
+#' Generate covariate combinations for tidy_msm_* functions
+#' 
+#' Creates systematic covariate combinations at specified percentiles for continuous
+#' variables and all categories for categorical variables. Automatically detects 
+#' variable types and handles spline variables appropriately.
+#'
+#' @param patient_data Data frame containing your patient data
+#' @param continuous_vars Character vector of continuous variable names
+#' @param categorical_vars Character vector of categorical variable names (optional)
+#' @param percentiles Numeric vector of percentiles for continuous variables (default: c(0.25, 0.5, 0.75))
+#' @param include_extremes Logical, whether to include min/max for continuous vars (default: TRUE)
+#' @param spline_vars Character vector of variables that are modeled as splines (optional)
+#' @param other_vars Named list of other variables to hold constant (optional)
+#' @param model_structure Character, which model structure to filter data for (optional)
+#' @return List of named lists suitable for tidy_msm_* covariates_list parameter
+#' @examples
+#' # Basic usage with your continuous_covariates from config
+#' covariates_list <- generate_covariate_combinations(
+#'   patient_data = patient_data,
+#'   continuous_vars = continuous_covariates,  # from your config: age, cci_score, BMI
+#'   model_structure = "progressive_discharge"
+#' )
+#' 
+#' # Include categorical variables
+#' covariates_list <- generate_covariate_combinations(
+#'   patient_data = patient_data,
+#'   continuous_vars = c("age", "cci_score", "BMI"),
+#'   categorical_vars = c("sex", "race", "smoking"),
+#'   model_structure = "progressive_discharge"
+#' )
+#' 
+#' # Custom percentiles and other variables held constant
+#' covariates_list <- generate_covariate_combinations(
+#'   patient_data = patient_data,
+#'   continuous_vars = c("age", "cci_score"),
+#'   percentiles = c(0.1, 0.5, 0.9),
+#'   other_vars = list(sex = "Male", smoking = "Never"),
+#'   model_structure = "progressive_discharge"
+#' )
+generate_covariate_combinations <- function(patient_data,
+                                            continuous_vars = NULL,
+                                            categorical_vars = NULL,
+                                            percentiles = c(0.25, 0.5, 0.75),
+                                            include_extremes = TRUE,
+                                            spline_vars = NULL,
+                                            other_vars = NULL,
+                                            model_structure = NULL) {
+  
+  # Validate inputs
+  if (is.null(continuous_vars) && is.null(categorical_vars)) {
+    stop("Must specify at least one of continuous_vars or categorical_vars")
+  }
+  
+  if (!is.data.frame(patient_data)) {
+    stop("patient_data must be a data frame")
+  }
+  
+  # Filter data by model structure if specified
+  if (!is.null(model_structure)) {
+    if ("model" %in% names(patient_data)) {
+      model_data <- patient_data %>% filter(model == model_structure)
+    } else {
+      warning("model_structure specified but 'model' column not found in patient_data")
+      model_data <- patient_data
+    }
+  } else {
+    model_data <- patient_data
+  }
+  
+  if (nrow(model_data) == 0) {
+    stop("No data remaining after filtering by model_structure")
+  }
+  
+  # Initialize list to store all combinations
+  covariate_combinations <- list()
+  
+  # Process continuous variables
+  if (!is.null(continuous_vars)) {
+    for (var in continuous_vars) {
+      if (!var %in% names(model_data)) {
+        warning(paste("Variable", var, "not found in data, skipping"))
+        next
+      }
+      
+      var_values <- model_data[[var]]
+      var_values <- var_values[!is.na(var_values)]
+      
+      if (length(var_values) == 0) {
+        warning(paste("No non-NA values for", var, ", skipping"))
+        next
+      }
+      
+      # Calculate percentiles
+      percentile_values <- quantile(var_values, probs = percentiles, na.rm = TRUE)
+      
+      # Add extremes if requested
+      if (include_extremes) {
+        min_val <- min(var_values, na.rm = TRUE)
+        max_val <- max(var_values, na.rm = TRUE)
+        all_values <- c(min_val, percentile_values, max_val)
+        names(all_values) <- c("min", paste0("p", percentiles*100), "max")
+        # Remove duplicates
+        all_values <- all_values[!duplicated(all_values)]
+      } else {
+        all_values <- percentile_values
+        names(all_values) <- paste0("p", percentiles*100)
+      }
+      
+      # Create combinations for this variable
+      for (i in seq_along(all_values)) {
+        combo_name <- paste0(var, "_", names(all_values)[i])
+        combo <- list()
+        combo[[var]] <- unname(all_values[i])
+        
+        # Add other variables to hold constant
+        if (!is.null(other_vars)) {
+          for (other_var in names(other_vars)) {
+            combo[[other_var]] <- other_vars[[other_var]]
+          }
+        }
+        
+        covariate_combinations[[combo_name]] <- combo
+      }
+    }
+  }
+  
+  # Process categorical variables
+  if (!is.null(categorical_vars)) {
+    for (var in categorical_vars) {
+      if (!var %in% names(model_data)) {
+        warning(paste("Variable", var, "not found in data, skipping"))
+        next
+      }
+      
+      var_categories <- unique(model_data[[var]])
+      var_categories <- var_categories[!is.na(var_categories)]
+      
+      if (length(var_categories) == 0) {
+        warning(paste("No non-NA categories for", var, ", skipping"))
+        next
+      }
+      
+      # Create combinations for each category
+      for (category in var_categories) {
+        combo_name <- paste0(var, "_", make.names(as.character(category)))
+        combo <- list()
+        combo[[var]] <- category
+        
+        # Add other variables to hold constant
+        if (!is.null(other_vars)) {
+          for (other_var in names(other_vars)) {
+            combo[[other_var]] <- other_vars[[other_var]]
+          }
+        }
+        
+        covariate_combinations[[combo_name]] <- combo
+      }
+    }
+  }
+  
+  if (length(covariate_combinations) == 0) {
+    warning("No valid covariate combinations generated")
+    return(list())
+  }
+  
+  # Print summary
+  cat("Generated", length(covariate_combinations), "covariate combinations:\n")
+  if (!is.null(continuous_vars)) {
+    n_continuous <- sum(sapply(covariate_combinations, function(x) {
+      any(names(x) %in% continuous_vars)
+    }))
+    cat("  ", n_continuous, "continuous variable combinations\n")
+  }
+  if (!is.null(categorical_vars)) {
+    n_categorical <- sum(sapply(covariate_combinations, function(x) {
+      any(names(x) %in% categorical_vars)
+    }))
+    cat("  ", n_categorical, "categorical variable combinations\n")
+  }
+  
+  return(covariate_combinations)
+}
+
+#' Generate covariate combinations specifically for spline variables
+#' 
+#' Creates systematic evaluation points for spline variables, useful for 
+#' plotting smooth curves and understanding spline effects.
+#'
+#' @param patient_data Data frame containing patient data
+#' @param spline_vars Character vector of spline variable names
+#' @param n_points Number of evaluation points across the range (default: 20)
+#' @param other_vars Named list of other variables to hold constant
+#' @param model_structure Character, model structure to filter data for
+#' @return List of covariate combinations for spline evaluation
+generate_spline_combinations <- function(patient_data,
+                                         spline_vars,
+                                         n_points = 20,
+                                         other_vars = NULL,
+                                         model_structure = NULL) {
+  
+  if (!is.character(spline_vars) || length(spline_vars) == 0) {
+    stop("spline_vars must be a non-empty character vector")
+  }
+  
+  # Filter data by model structure if specified
+  if (!is.null(model_structure)) {
+    if ("model" %in% names(patient_data)) {
+      model_data <- patient_data %>% filter(model == model_structure)
+    } else {
+      model_data <- patient_data
+    }
+  } else {
+    model_data <- patient_data
+  }
+  
+  covariate_combinations <- list()
+  
+  for (var in spline_vars) {
+    if (!var %in% names(model_data)) {
+      warning(paste("Spline variable", var, "not found in data, skipping"))
+      next
+    }
+    
+    var_values <- model_data[[var]]
+    var_values <- var_values[!is.na(var_values)]
+    
+    if (length(var_values) == 0) {
+      warning(paste("No non-NA values for spline variable", var, ", skipping"))
+      next
+    }
+    
+    # Create evaluation grid
+    var_range <- range(var_values, na.rm = TRUE)
+    eval_points <- seq(var_range[1], var_range[2], length.out = n_points)
+    
+    # Create combinations
+    for (i in seq_along(eval_points)) {
+      combo_name <- paste0(var, "_spline_", sprintf("%02d", i))
+      combo <- list()
+      combo[[var]] <- eval_points[i]
+      
+      # Add other variables
+      if (!is.null(other_vars)) {
+        for (other_var in names(other_vars)) {
+          combo[[other_var]] <- other_vars[[other_var]]
+        }
+      }
+      
+      covariate_combinations[[combo_name]] <- combo
+    }
+  }
+  
+  cat("Generated", length(covariate_combinations), "spline evaluation combinations\n")
+  cat("Variables:", paste(spline_vars, collapse = ", "), "\n")
+  cat("Points per variable:", n_points, "\n")
+  
+  return(covariate_combinations)
+}
+
+#' Quick wrapper using your project's configuration
+#' 
+#' Uses the continuous_covariates and key_covariates from your config file
+#' to generate standard combinations.
+#'
+#' @param patient_data Your patient data
+#' @param model_structure Model structure to analyze
+#' @param use_key_categoricals Logical, whether to include key categorical variables
+#' @return List suitable for tidy_msm_* functions
+generate_project_covariate_combinations <- function(patient_data,
+                                                    model_structure = NULL,
+                                                    use_key_categoricals = FALSE) {
+  
+  # Use your project's continuous variables
+  continuous_vars <- c("age", "cci_score", "BMI")
+  
+  # Optionally add key categorical variables
+  categorical_vars <- if (use_key_categoricals) {
+    c("sex", "race", "ethnicity", "smoking", "insurance_type", 
+      "bmi_cat", "COVID_vax", "chf", "cci_cat", "copd", "dnr_on_admit")
+  } else {
+    NULL
+  }
+  
+  generate_covariate_combinations(
+    patient_data = patient_data,
+    continuous_vars = continuous_vars,
+    categorical_vars = categorical_vars,
+    percentiles = c(0.25, 0.5, 0.75),
+    include_extremes = TRUE,
+    model_structure = model_structure
+  )
+}
+
+#' Generate model-specific covariate combinations 
+#' 
+#' Creates a covariates_list where each combination only contains variables
+#' that are relevant to each specific model. This prevents MSM warnings.
+#'
+#' @param fitted_msm_models Nested list of fitted MSM models
+#' @param patient_data Data frame containing patient data
+#' @return Special covariates_list structure that works with tidy_msm_* functions
+generate_model_specific_covariate_combinations <- function(fitted_msm_models,
+                                                           patient_data) {
+  
+  # Create a special structure: for each model, store its valid combinations
+  model_combinations <- list()
+  
+  for (model_name in names(fitted_msm_models)) {
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
+      
+      # Skip failed models
+      if (is.null(model_entry) || 
+          (is.list(model_entry) && !is.null(model_entry$status) && 
+           model_entry$status == "failed")) {
+        next
+      }
+      
+      # Extract metadata
+      metadata <- if (is.list(model_entry) && !is.null(model_entry$metadata)) {
+        model_entry$metadata
+      } else {
+        list()
+      }
+      
+      # Get variables from this specific model
+      model_vars <- extract_base_variables_from_metadata(metadata)
+      
+      if (length(model_vars) == 0) {
+        # No covariates model - skip
+        next
+      }
+      
+      # Generate combinations only for variables in THIS model
+      model_key <- paste0(model_name, "||", formula_name)
+      
+      # Separate continuous and categorical
+      known_continuous <- c("age", "cci_score", "BMI")
+      continuous_vars <- intersect(model_vars, known_continuous)
+      categorical_vars <- setdiff(model_vars, known_continuous)
+      
+      combinations <- list()
+      
+      # Process continuous variables
+      for (var in continuous_vars) {
+        if (!var %in% names(patient_data)) next
+        
+        var_values <- patient_data[[var]]
+        var_values <- var_values[!is.na(var_values)]
+        if (length(var_values) == 0) next
+        
+        # Calculate percentiles and extremes
+        percentiles <- c(0.25, 0.5, 0.75)
+        percentile_values <- quantile(var_values, probs = percentiles, na.rm = TRUE)
+        min_val <- min(var_values, na.rm = TRUE)
+        max_val <- max(var_values, na.rm = TRUE)
+        all_values <- c(min_val, percentile_values, max_val)
+        names(all_values) <- c("min", paste0("p", percentiles*100), "max")
+        all_values <- all_values[!duplicated(all_values)]
+        
+        # Create combinations
+        for (i in seq_along(all_values)) {
+          combo_name <- paste0(var, "_", names(all_values)[i])
+          combo <- list()
+          combo[[var]] <- unname(all_values[i])
+          combinations[[combo_name]] <- combo
+        }
+      }
+      
+      # Process categorical variables
+      for (var in categorical_vars) {
+        if (!var %in% names(patient_data)) next
+        
+        var_categories <- unique(patient_data[[var]])
+        var_categories <- var_categories[!is.na(var_categories)]
+        if (length(var_categories) == 0) next
+        
+        for (category in var_categories) {
+          combo_name <- paste0(var, "_", make.names(as.character(category)))
+          combo <- list()
+          combo[[var]] <- category
+          combinations[[combo_name]] <- combo
+        }
+      }
+      
+      # Store combinations for this specific model
+      if (length(combinations) > 0) {
+        model_combinations[[model_key]] <- combinations
+      }
+    }
+  }
+  
+  cat("Generated model-specific combinations for", length(model_combinations), "models\n")
+  
+  # Return the model-specific structure
+  return(model_combinations)
+}
+
+#' Detect if this is a univariate analysis
+#' 
+#' Checks model names/formulas to determine if this is univariate analysis
+#' where each model has only one covariate.
+#'
+#' @param fitted_msm_models Nested list of fitted MSM models
+#' @return Logical indicating if this appears to be univariate analysis
+is_univariate_analysis <- function(fitted_msm_models) {
+  
+  # Check model names for univariate patterns
+  model_names <- names(fitted_msm_models)
+  
+  # Look for patterns like "age_linear", "BMI_spline", etc.
+  univar_patterns <- c("_linear$", "_spline$", "age_", "BMI_", "cci_score_", 
+                       "sex_", "race_", "smoking_", "insurance_")
+  
+  has_univar_names <- any(sapply(univar_patterns, function(pattern) {
+    any(grepl(pattern, model_names))
+  }))
+  
+  if (has_univar_names) return(TRUE)
+  
+  # Check if most models have only one covariate
+  single_covariate_count <- 0
+  total_models <- 0
+  
+  for (model_name in names(fitted_msm_models)) {
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
+      
+      if (is.null(model_entry) || 
+          (is.list(model_entry) && !is.null(model_entry$status) && 
+           model_entry$status == "failed")) {
+        next
+      }
+      
+      metadata <- if (is.list(model_entry) && !is.null(model_entry$metadata)) {
+        model_entry$metadata
+      } else {
+        list()
+      }
+      
+      model_vars <- extract_base_variables_from_metadata(metadata)
+      
+      total_models <- total_models + 1
+      if (length(model_vars) <= 1) {
+        single_covariate_count <- single_covariate_count + 1
+      }
+    }
+  }
+  
+  # If >80% of models have 1 or fewer covariates, consider it univariate
+  if (total_models > 0) {
+    return((single_covariate_count / total_models) > 0.8)
+  }
+  
+  return(FALSE)
+}
+
+#' Generate model-aware covariate combinations for multivariate analyses
+#' 
+#' For non-univariate analyses, creates appropriate covariate combinations
+#' that include variables found across the fitted models.
+#'
+#' @param fitted_msm_models Nested list of fitted MSM models
+#' @param patient_data Data frame containing patient data
+#' @return List of covariate combinations
+generate_model_aware_covariate_combinations <- function(fitted_msm_models, patient_data) {
+  
+  # Extract all variables used across all models
+  all_variables_used <- c()
+  
+  for (model_name in names(fitted_msm_models)) {
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
+      
+      if (is.null(model_entry) || 
+          (is.list(model_entry) && !is.null(model_entry$status) && 
+           model_entry$status == "failed")) {
+        next
+      }
+      
+      metadata <- if (is.list(model_entry) && !is.null(model_entry$metadata)) {
+        model_entry$metadata
+      } else {
+        list()
+      }
+      
+      model_vars <- extract_base_variables_from_metadata(metadata)
+      all_variables_used <- c(all_variables_used, model_vars)
+    }
+  }
+  
+  all_variables_used <- unique(all_variables_used)
+  
+  if (length(all_variables_used) == 0) {
+    return(NULL)
+  }
+  
+  # Separate continuous and categorical variables
+  known_continuous <- c("age", "cci_score", "BMI")
+  continuous_vars <- intersect(all_variables_used, known_continuous)
+  categorical_vars <- setdiff(all_variables_used, known_continuous)
+  
+  # Generate combinations using existing function
+  generate_covariate_combinations(
+    patient_data = patient_data,
+    continuous_vars = continuous_vars,
+    categorical_vars = categorical_vars,
+    percentiles = c(0.25, 0.5, 0.75),
+    include_extremes = TRUE
+  )
 }
 
 ### Extract HRs from fitted model ----------
@@ -2272,16 +2807,1008 @@ group_hazard_ratios_by_variable <- function(tidied_hrs) {
     ungroup()
 }
 
+### Extract HRs from spline models ----------
+
+#' Extract hazard ratios across values of a spline covariate for all models
+#' 
+#' @param fitted_msm_models Nested list of fitted models (output from fit_msm_models or similar)
+#' @param spline_var Name of the spline variable (e.g., "age" or "DaysSinceEntry")
+#' @param reference_value Optional reference value for HR calculation. If NULL, uses mean of covariate.
+#' @param grid_length Number of prediction points across covariate range
+#' @param ci_level Confidence level for intervals (default 0.95)
+#' @param verbose If TRUE, print informative messages about skipped models
+#' 
+#' @return Data frame with columns:
+#'   - model_name: Name of model structure
+#'   - formula: Formula used
+#'   - covariate_value: Values where HRs are calculated
+#'   - transition: Transition label (e.g., "M -> S")
+#'   - from_state: Starting state
+#'   - to_state: Ending state
+#'   - log_hazard: Log-hazard at covariate value
+#'   - log_hr: Log-HR relative to reference
+#'   - hr: Hazard ratio
+#'   - hr_lower: Lower CI bound
+#'   - hr_upper: Upper CI bound
+#'   - reference_value: Reference value used
+#'   - spline_variable: Name of spline variable
+#'   
+extract_spline_hazard_ratios <- function(fitted_msm_models,
+                                         spline_var,
+                                         reference_value = NULL,
+                                         grid_length = 100,
+                                         ci_level = 0.95,
+                                         verbose = FALSE) {
+  
+  if (!is.list(fitted_msm_models)) {
+    stop("fitted_msm_models must be a list")
+  }
+  
+  results_list <- list()
+  n_skipped_failed <- 0
+  n_skipped_no_spline <- 0
+  n_skipped_wrong_var <- 0
+  n_skipped_error <- 0
+  n_success <- 0
+  
+  # Loop through model structures (outer level)
+  for (model_name in names(fitted_msm_models)) {
+    
+    # Loop through covariate formulas (inner level)
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
+      
+      # Check if this is a failed model
+      if (is.null(model_entry) || 
+          (is.list(model_entry) && !is.null(model_entry$status) && 
+           model_entry$status == "failed")) {
+        n_skipped_failed <- n_skipped_failed + 1
+        if (verbose) {
+          message(paste("Skipping", model_name, formula_name, "- model failed to fit"))
+        }
+        next
+      }
+      
+      # Check if fitted_model exists
+      if (is.null(model_entry$fitted_model)) {
+        n_skipped_failed <- n_skipped_failed + 1
+        if (verbose) {
+          message(paste("Skipping", model_name, formula_name, "- fitted_model is NULL"))
+        }
+        next
+      }
+      
+      # Check if metadata exists
+      if (is.null(model_entry$metadata)) {
+        n_skipped_error <- n_skipped_error + 1
+        if (verbose) {
+          message(paste("Skipping", model_name, formula_name, "- metadata is NULL"))
+        }
+        next
+      }
+      
+      # Quick check: does this model have the spline variable?
+      spline_meta <- find_spline_metadata(model_entry$metadata, spline_var)
+      if (is.null(spline_meta)) {
+        # Check if it's because the variable is linear or just not present
+        time_config <- model_entry$metadata$time_config
+        if (!is.null(time_config) && 
+            time_config$variable == spline_var && 
+            time_config$type != "spline") {
+          n_skipped_no_spline <- n_skipped_no_spline + 1
+          if (verbose) {
+            message(paste("Skipping", model_name, formula_name, 
+                          "- variable", spline_var, "is", time_config$type, "not spline"))
+          }
+        } else {
+          n_skipped_wrong_var <- n_skipped_wrong_var + 1
+          if (verbose) {
+            message(paste("Skipping", model_name, formula_name, 
+                          "- spline variable", spline_var, "not found"))
+          }
+        }
+        next
+      }
+      
+      # Try to extract HRs for this model
+      model_hrs <- tryCatch({
+        extract_spline_hazard_ratios_single(
+          model_entry = model_entry,
+          spline_var = spline_var,
+          reference_value = reference_value,
+          grid_length = grid_length,
+          ci_level = ci_level
+        )
+      }, error = function(e) {
+        n_skipped_error <<- n_skipped_error + 1
+        warning(paste("Error extracting HRs for", model_name, formula_name, ":", e$message))
+        return(NULL)
+      })
+      
+      # Add model identifiers if successful
+      if (!is.null(model_hrs)) {
+        model_hrs$model_name <- model_name
+        model_hrs$formula <- formula_name
+        n_success <- n_success + 1
+        
+        results_list[[paste(model_name, formula_name, sep = "___")]] <- model_hrs
+      }
+    }
+  }
+  
+  # Print summary
+  if (verbose || n_success == 0) {
+    cat("\n=== Spline HR Extraction Summary ===\n")
+    cat("Successfully extracted:", n_success, "\n")
+    cat("Skipped - model failed/NULL:", n_skipped_failed, "\n")
+    cat("Skipped - variable not spline:", n_skipped_no_spline, "\n")
+    cat("Skipped - different variable:", n_skipped_wrong_var, "\n")
+    cat("Skipped - other errors:", n_skipped_error, "\n")
+  }
+  
+  # Combine all results
+  if (length(results_list) == 0) {
+    warning(paste("No valid models found with", spline_var, "as a spline covariate"))
+    return(data.frame())
+  }
+  
+  results <- bind_rows(results_list)
+  
+  # Reorder columns to put identifiers first
+  results <- results %>%
+    select(model_name, formula, everything())
+  
+  return(results)
+}
+
+#' Extract hazard ratios for a single model entry (internal function)
+#' @keywords internal
+extract_spline_hazard_ratios_single <- function(model_entry,
+                                                spline_var,
+                                                reference_value = NULL,
+                                                grid_length = 100,
+                                                ci_level = 0.95) {
+  
+  fitted_model <- model_entry$fitted_model
+  metadata <- model_entry$metadata
+  
+  # Find spline metadata for this variable
+  spline_meta <- find_spline_metadata(metadata, spline_var)
+  
+  if (is.null(spline_meta)) {
+    stop(paste("Spline variable", spline_var, "not found in model metadata"))
+  }
+  
+  # Extract spline information
+  spline_type <- spline_meta$type
+  spline_df <- spline_meta$df
+  knots <- spline_meta$knots
+  boundary_knots <- spline_meta$boundary_knots
+  var_range <- spline_meta$var_range
+  spline_terms <- spline_meta$spline_terms
+  
+  # Validate that we have the necessary knot information
+  if (is.null(knots) || is.null(boundary_knots)) {
+    stop(paste("Knot information missing for", spline_var, 
+               "- cannot recreate spline basis"))
+  }
+  
+  # Handle NA knots/boundary_knots (from the fix we discussed earlier)
+  if (length(knots) == 1 && is.na(knots)) {
+    stop(paste("Knot information is NA for", spline_var))
+  }
+  if (length(boundary_knots) == 1 && is.na(boundary_knots)) {
+    stop(paste("Boundary knot information is NA for", spline_var))
+  }
+  
+  # Extract coefficient matrices
+  Qmatrices <- fitted_model$Qmatrices
+  
+  # Verify all spline terms are present
+  missing_terms <- setdiff(spline_terms, names(Qmatrices))
+  if (length(missing_terms) > 0) {
+    stop(paste("Spline terms not found in Qmatrices:", 
+               paste(missing_terms, collapse = ", ")))
+  }
+  
+  # Get baseline matrix and identify valid transitions
+  baseline_matrix <- Qmatrices$logbaseline
+  transitions <- get_valid_transitions_ordered(baseline_matrix)
+  
+  if (nrow(transitions) == 0) {
+    stop("No valid transitions found in model")
+  }
+  
+  # Create prediction grid
+  grid_values <- seq(var_range[1], var_range[2], length.out = grid_length)
+  
+  # Generate spline basis at grid points
+  grid_basis <- create_spline_basis_with_knots(
+    grid_values, spline_df, spline_type, knots, boundary_knots
+  )
+  
+  # Determine reference value
+  if (is.null(reference_value)) {
+    reference_value <- mean(var_range)
+  }
+  
+  # Validate reference value is in range
+  if (reference_value < var_range[1] || reference_value > var_range[2]) {
+    warning(paste("Reference value", reference_value, "is outside observed range",
+                  "[", var_range[1], ",", var_range[2], "]"))
+  }
+  
+  # Generate spline basis at reference
+  ref_basis <- create_spline_basis_with_knots(
+    reference_value, spline_df, spline_type, knots, boundary_knots
+  )
+  
+  # Extract coefficient matrices for spline terms
+  coef_matrices <- lapply(spline_terms, function(term) Qmatrices[[term]])
+  
+  # Get variance-covariance matrix for delta method
+  vcov_matrix <- fitted_model$covmat
+  
+  if (is.null(vcov_matrix)) {
+    warning("Variance-covariance matrix not available - CIs will not be calculated")
+  }
+  
+  # Calculate hazard ratios for each transition
+  results_list <- lapply(1:nrow(transitions), function(i) {
+    from_state <- transitions$from[i]
+    to_state <- transitions$to[i]
+    transition_label <- transitions$label[i]
+    
+    # Extract coefficients for this transition
+    coefs <- sapply(coef_matrices, function(mat) mat[from_state, to_state])
+    
+    # Calculate log-hazards at grid points
+    log_hazards_grid <- as.vector(grid_basis %*% coefs)
+    
+    # Calculate log-hazard at reference
+    log_hazard_ref <- as.vector(ref_basis %*% coefs)
+    
+    # Calculate log-HRs
+    log_hrs <- log_hazards_grid - log_hazard_ref
+    
+    # Calculate HRs
+    hrs <- exp(log_hrs)
+    
+    # Calculate confidence intervals using delta method
+    if (!is.null(vcov_matrix)) {
+      ci_results <- calculate_spline_hr_ci(
+        grid_basis, ref_basis, coefs, spline_terms, 
+        vcov_matrix, from_state, to_state, ci_level, fitted_model
+      )
+      hr_lower <- ci_results$hr_lower
+      hr_upper <- ci_results$hr_upper
+    } else {
+      hr_lower <- rep(NA_real_, grid_length)
+      hr_upper <- rep(NA_real_, grid_length)
+    }
+    
+    # Create output data frame
+    data.frame(
+      covariate_value = grid_values,
+      transition = transition_label,
+      from_state = from_state,
+      to_state = to_state,
+      log_hazard = log_hazards_grid,
+      log_hr = log_hrs,
+      hr = hrs,
+      hr_lower = hr_lower,
+      hr_upper = hr_upper,
+      reference_value = reference_value,
+      spline_variable = spline_var,
+      stringsAsFactors = FALSE
+    )
+  })
+  
+  # Combine all transitions
+  results <- bind_rows(results_list)
+  
+  return(results)
+}
+
+#' Find spline metadata for a variable in model metadata
+#' @keywords internal
+find_spline_metadata <- function(metadata, spline_var) {
+  
+  # Check in regular spline_config first
+  if (!is.null(metadata$spline_config) && 
+      !is.null(metadata$spline_config$spline_metadata)) {
+    spline_meta_list <- metadata$spline_config$spline_metadata
+    if (spline_var %in% names(spline_meta_list)) {
+      return(spline_meta_list[[spline_var]])
+    }
+  }
+  
+  # Check in time_config for time variables
+  if (!is.null(metadata$time_config) && 
+      !is.null(metadata$time_config$variable) &&
+      metadata$time_config$variable == spline_var &&
+      metadata$time_config$type == "spline") {
+    
+    # Extract from time_config
+    return(list(
+      original_variable = spline_var,
+      type = metadata$time_config$spline_type,
+      df = metadata$time_config$spline_df,
+      knots = metadata$time_config$knots,
+      boundary_knots = metadata$time_config$boundary_knots,
+      var_range = metadata$time_config$var_range,
+      spline_terms = paste0(spline_var, "_", metadata$time_config$spline_type, 
+                            1:metadata$time_config$spline_df)
+    ))
+  }
+  
+  return(NULL)
+}
+
+#' Get valid transitions from baseline matrix
+#' @keywords internal
+get_valid_transitions <- function(baseline_matrix) {
+  
+  state_names <- rownames(baseline_matrix)
+  
+  transitions <- data.frame(
+    from = character(),
+    to = character(),
+    label = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (i in 1:nrow(baseline_matrix)) {
+    for (j in 1:ncol(baseline_matrix)) {
+      # Check for non-zero off-diagonal elements
+      if (i != j && baseline_matrix[i, j] != 0) {
+        transitions <- rbind(transitions, data.frame(
+          from = state_names[i],
+          to = state_names[j],
+          label = paste(state_names[i], "->", state_names[j]),
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+  
+  return(transitions)
+}
+
+#' Create spline basis with specified knots
+#' @keywords internal
+create_spline_basis_with_knots <- function(x, df, type, knots, boundary_knots) {
+  
+  if (type == "ns") {
+    basis <- splines::ns(x, df = df, knots = knots, Boundary.knots = boundary_knots)
+  } else if (type == "bs") {
+    basis <- splines::bs(x, df = df, knots = knots, Boundary.knots = boundary_knots)
+  } else {
+    stop(paste("Spline type", type, "not supported"))
+  }
+  
+  return(basis)
+}
+
+#' Calculate confidence intervals for spline hazard ratios using delta method
+#' @keywords internal
+calculate_spline_hr_ci <- function(grid_basis, ref_basis, coefs, spline_terms,
+                                   vcov_matrix, from_state, to_state, 
+                                   ci_level, fitted_model) {
+  
+  # Get the Qmatrices to understand structure
+  Qmatrices <- fitted_model$Qmatrices
+  baseline_matrix <- Qmatrices$logbaseline
+  
+  # Identify all transitions in the order they appear in the coefficient vector
+  transitions_ordered <- get_valid_transitions_ordered(baseline_matrix)
+  
+  # Find which transition index this is
+  transition_idx <- which(transitions_ordered$from == from_state & 
+                            transitions_ordered$to == to_state)
+  
+  if (length(transition_idx) == 0) {
+    warning(paste("Could not find transition", from_state, "->", to_state))
+    return(list(
+      hr_lower = rep(NA_real_, nrow(grid_basis)),
+      hr_upper = rep(NA_real_, nrow(grid_basis))
+    ))
+  }
+  
+  # Calculate coefficient indices
+  # Structure: qbase (n_transitions), then for each covariate: qcov (n_transitions)
+  n_transitions <- nrow(transitions_ordered)
+  n_base_params <- n_transitions  # baseline parameters
+  
+  # For each spline term, the coefficient is at position:
+  # n_base_params + (spline_term_index - 1) * n_transitions + transition_idx
+  coef_indices <- numeric(length(spline_terms))
+  for (i in seq_along(spline_terms)) {
+    coef_indices[i] <- n_base_params + (i - 1) * n_transitions + transition_idx
+  }
+  
+  # Verify dimensions
+  if (any(coef_indices > nrow(vcov_matrix))) {
+    warning(paste("Coefficient indices out of range for transition",
+                  from_state, "->", to_state))
+    return(list(
+      hr_lower = rep(NA_real_, nrow(grid_basis)),
+      hr_upper = rep(NA_real_, nrow(grid_basis))
+    ))
+  }
+  
+  # Extract sub-matrix of vcov for these coefficients
+  vcov_sub <- vcov_matrix[coef_indices, coef_indices, drop = FALSE]
+  
+  # Calculate variance of log-HR at each grid point using delta method
+  z_score <- qnorm(1 - (1 - ci_level) / 2)
+  
+  hr_lower <- numeric(nrow(grid_basis))
+  hr_upper <- numeric(nrow(grid_basis))
+  
+  for (i in 1:nrow(grid_basis)) {
+    basis_diff <- grid_basis[i, ] - ref_basis[1, ]
+    
+    # Variance of log-HR
+    var_log_hr <- as.numeric(t(basis_diff) %*% vcov_sub %*% basis_diff)
+    se_log_hr <- sqrt(var_log_hr)
+    
+    # Calculate log-HR
+    log_hr <- sum(grid_basis[i, ] * coefs) - sum(ref_basis[1, ] * coefs)
+    
+    # CI on log scale
+    log_hr_lower <- log_hr - z_score * se_log_hr
+    log_hr_upper <- log_hr + z_score * se_log_hr
+    
+    # Transform to HR scale
+    hr_lower[i] <- exp(log_hr_lower)
+    hr_upper[i] <- exp(log_hr_upper)
+  }
+  
+  return(list(
+    hr_lower = hr_lower,
+    hr_upper = hr_upper
+  ))
+}
+
+#' Get valid transitions in the order they appear in coefficient vector
+#' @keywords internal
+get_valid_transitions_ordered <- function(baseline_matrix) {
+  
+  state_names <- rownames(baseline_matrix)
+  
+  transitions <- data.frame(
+    from = character(),
+    to = character(),
+    label = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Important: loop in row-major order to match msm's ordering
+  for (i in 1:nrow(baseline_matrix)) {
+    for (j in 1:ncol(baseline_matrix)) {
+      # Check for non-zero off-diagonal elements
+      if (i != j && baseline_matrix[i, j] != 0) {
+        transitions <- rbind(transitions, data.frame(
+          from = state_names[i],
+          to = state_names[j],
+          label = paste(state_names[i], "->", state_names[j]),
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+  
+  return(transitions)
+}
+
+## Extract linear HRs from fitted models with continuous covariates ----------
+
+#' Extract hazard ratios across values of a linear covariate
+#' 
+#' @param fitted_msm_models Nested list of fitted models (output from fit_msm_models or similar)
+#' @param linear_var Name of the linear variable (e.g., "age" or "DaysSinceEntry")
+#' @param reference_value Optional reference value for HR calculation. If NULL, uses mean of covariate.
+#' @param grid_length Number of prediction points across covariate range
+#' @param ci_level Confidence level for intervals (default 0.95)
+#' @param verbose If TRUE, print informative messages about skipped models
+#' 
+#' @return Data frame with columns:
+#'   - model_name: Name of model structure
+#'   - formula: Formula used
+#'   - covariate_value: Values where HRs are calculated
+#'   - transition: Transition label (e.g., "M -> S")
+#'   - from_state: Starting state
+#'   - to_state: Ending state
+#'   - log_hazard: Log-hazard at covariate value (relative to 0)
+#'   - log_hr: Log-HR relative to reference
+#'   - hr: Hazard ratio
+#'   - hr_lower: Lower CI bound
+#'   - hr_upper: Upper CI bound
+#'   - reference_value: Reference value used
+#'   - linear_variable: Name of linear variable
+#'   
+extract_linear_hazard_ratios <- function(fitted_msm_models,
+                                         linear_var,
+                                         reference_value = NULL,
+                                         grid_length = 100,
+                                         ci_level = 0.95,
+                                         verbose = FALSE) {
+  
+  if (!is.list(fitted_msm_models)) {
+    stop("fitted_msm_models must be a list")
+  }
+  
+  results_list <- list()
+  n_skipped_failed <- 0
+  n_skipped_no_linear <- 0
+  n_skipped_wrong_var <- 0
+  n_skipped_error <- 0
+  n_success <- 0
+  
+  # Loop through model structures (outer level)
+  for (model_name in names(fitted_msm_models)) {
+    
+    # Loop through covariate formulas (inner level)
+    for (formula_name in names(fitted_msm_models[[model_name]])) {
+      
+      model_entry <- fitted_msm_models[[model_name]][[formula_name]]
+      
+      # Check if this is a failed model
+      if (is.null(model_entry) || 
+          (is.list(model_entry) && !is.null(model_entry$status) && 
+           model_entry$status == "failed")) {
+        n_skipped_failed <- n_skipped_failed + 1
+        if (verbose) {
+          message(paste("Skipping", model_name, formula_name, "- model failed to fit"))
+        }
+        next
+      }
+      
+      # Check if fitted_model exists
+      if (is.null(model_entry$fitted_model)) {
+        n_skipped_failed <- n_skipped_failed + 1
+        if (verbose) {
+          message(paste("Skipping", model_name, formula_name, "- fitted_model is NULL"))
+        }
+        next
+      }
+      
+      # Check if metadata exists
+      if (is.null(model_entry$metadata)) {
+        n_skipped_error <- n_skipped_error + 1
+        if (verbose) {
+          message(paste("Skipping", model_name, formula_name, "- metadata is NULL"))
+        }
+        next
+      }
+      
+      # Quick check: does this model have the linear variable?
+      linear_meta <- find_linear_metadata(model_entry$metadata, linear_var)
+      if (is.null(linear_meta)) {
+        n_skipped_wrong_var <- n_skipped_wrong_var + 1
+        if (verbose) {
+          message(paste("Skipping", model_name, formula_name, 
+                        "- linear variable", linear_var, "not found"))
+        }
+        next
+      }
+      
+      # Check if variable is actually linear (not spline, piecewise, etc)
+      if (!linear_meta$is_linear) {
+        n_skipped_no_linear <- n_skipped_no_linear + 1
+        if (verbose) {
+          message(paste("Skipping", model_name, formula_name, 
+                        "- variable", linear_var, "is", linear_meta$type, "not linear"))
+        }
+        next
+      }
+      
+      # Try to extract HRs for this model
+      model_hrs <- tryCatch({
+        extract_linear_hazard_ratios_single(
+          model_entry = model_entry,
+          linear_var = linear_var,
+          reference_value = reference_value,
+          grid_length = grid_length,
+          ci_level = ci_level
+        )
+      }, error = function(e) {
+        n_skipped_error <<- n_skipped_error + 1
+        warning(paste("Error extracting HRs for", model_name, formula_name, ":", e$message))
+        return(NULL)
+      })
+      
+      # Add model identifiers if successful
+      if (!is.null(model_hrs)) {
+        model_hrs$model_name <- model_name
+        model_hrs$formula <- formula_name
+        n_success <- n_success + 1
+        
+        results_list[[paste(model_name, formula_name, sep = "___")]] <- model_hrs
+      }
+    }
+  }
+  
+  # Print summary
+  if (verbose || n_success == 0) {
+    cat("\n=== Linear HR Extraction Summary ===\n")
+    cat("Successfully extracted:", n_success, "\n")
+    cat("Skipped - model failed/NULL:", n_skipped_failed, "\n")
+    cat("Skipped - variable not linear:", n_skipped_no_linear, "\n")
+    cat("Skipped - different variable:", n_skipped_wrong_var, "\n")
+    cat("Skipped - other errors:", n_skipped_error, "\n")
+  }
+  
+  # Combine all results
+  if (length(results_list) == 0) {
+    warning(paste("No valid models found with", linear_var, "as a linear covariate"))
+    return(data.frame())
+  }
+  
+  results <- bind_rows(results_list)
+  
+  # Reorder columns to put identifiers first
+  results <- results %>%
+    select(model_name, formula, everything())
+  
+  return(results)
+}
+
+#' Extract hazard ratios for a single model entry with linear covariate (internal function)
+#' @keywords internal
+extract_linear_hazard_ratios_single <- function(model_entry,
+                                                linear_var,
+                                                reference_value = NULL,
+                                                grid_length = 100,
+                                                ci_level = 0.95) {
+  
+  fitted_model <- model_entry$fitted_model
+  metadata <- model_entry$metadata
+  
+  # Find linear metadata for this variable
+  linear_meta <- find_linear_metadata(metadata, linear_var)
+  
+  if (is.null(linear_meta)) {
+    stop(paste("Linear variable", linear_var, "not found in model metadata"))
+  }
+  
+  if (!linear_meta$is_linear) {
+    stop(paste("Variable", linear_var, "is not linear in this model"))
+  }
+  
+  # Get variable range - extract from data if not in metadata
+  var_range <- linear_meta$var_range
+  
+  if (is.null(var_range) || length(var_range) != 2 || any(is.na(var_range))) {
+    # Try to extract from fitted model data
+    var_range <- extract_variable_range_from_model(fitted_model, linear_var)
+    
+    if (is.null(var_range)) {
+      stop(paste("Could not determine variable range for", linear_var,
+                 "- not in metadata and not found in model data"))
+    }
+    
+    message(paste("Variable range for", linear_var, "extracted from model data:",
+                  "[", var_range[1], ",", var_range[2], "]"))
+  }
+  
+  # Extract coefficient matrices
+  Qmatrices <- fitted_model$Qmatrices
+  
+  # Verify linear variable is present
+  if (!linear_var %in% names(Qmatrices)) {
+    stop(paste("Linear variable", linear_var, "not found in Qmatrices"))
+  }
+  
+  # Get baseline matrix and identify valid transitions
+  baseline_matrix <- Qmatrices$logbaseline
+  transitions <- get_valid_transitions_ordered(baseline_matrix)
+  
+  if (nrow(transitions) == 0) {
+    stop("No valid transitions found in model")
+  }
+  
+  # Create prediction grid
+  grid_values <- seq(var_range[1], var_range[2], length.out = grid_length)
+  
+  # Determine reference value
+  if (is.null(reference_value)) {
+    reference_value <- mean(var_range)
+  }
+  
+  # Validate reference value is in range
+  if (reference_value < var_range[1] || reference_value > var_range[2]) {
+    warning(paste("Reference value", reference_value, "is outside observed range",
+                  "[", var_range[1], ",", var_range[2], "]"))
+  }
+  
+  # Extract coefficient matrix for linear variable
+  coef_matrix <- Qmatrices[[linear_var]]
+  
+  # Get variance-covariance matrix for delta method
+  vcov_matrix <- fitted_model$covmat
+  
+  if (is.null(vcov_matrix)) {
+    warning("Variance-covariance matrix not available - CIs will not be calculated")
+  }
+  
+  # Calculate hazard ratios for each transition
+  results_list <- lapply(1:nrow(transitions), function(i) {
+    from_state <- transitions$from[i]
+    to_state <- transitions$to[i]
+    transition_label <- transitions$label[i]
+    
+    # Extract coefficient for this transition
+    coef <- coef_matrix[from_state, to_state]
+    
+    # For linear: log(q_ij(x)) = log(baseline) + coef * x
+    # At reference: log(q_ij(ref)) = log(baseline) + coef * ref
+    # log HR = coef * (x - ref)
+    # HR = exp(coef * (x - ref))
+    
+    # Calculate log-hazards at grid points (relative to x=0)
+    log_hazards_grid <- coef * grid_values
+    
+    # Calculate log-hazard at reference (relative to x=0)
+    log_hazard_ref <- coef * reference_value
+    
+    # Calculate log-HRs (relative to reference)
+    log_hrs <- log_hazards_grid - log_hazard_ref
+    # Equivalently: log_hrs <- coef * (grid_values - reference_value)
+    
+    # Calculate HRs
+    hrs <- exp(log_hrs)
+    
+    # Calculate confidence intervals using delta method
+    if (!is.null(vcov_matrix)) {
+      ci_results <- calculate_linear_hr_ci(
+        grid_values, reference_value, coef, linear_var,
+        vcov_matrix, from_state, to_state, ci_level, fitted_model
+      )
+      hr_lower <- ci_results$hr_lower
+      hr_upper <- ci_results$hr_upper
+    } else {
+      hr_lower <- rep(NA_real_, grid_length)
+      hr_upper <- rep(NA_real_, grid_length)
+    }
+    
+    # Create output data frame
+    data.frame(
+      covariate_value = grid_values,
+      transition = transition_label,
+      from_state = from_state,
+      to_state = to_state,
+      log_hazard = log_hazards_grid,
+      log_hr = log_hrs,
+      hr = hrs,
+      hr_lower = hr_lower,
+      hr_upper = hr_upper,
+      reference_value = reference_value,
+      linear_variable = linear_var,
+      stringsAsFactors = FALSE
+    )
+  })
+  
+  # Combine all transitions
+  results <- bind_rows(results_list)
+  
+  return(results)
+}
+
+#' Extract variable range from fitted model data
+#' @keywords internal
+extract_variable_range_from_model <- function(fitted_model, var_name) {
+  
+  # Try to get from model$data
+  if (!is.null(fitted_model$data) && is.data.frame(fitted_model$data)) {
+    if (var_name %in% names(fitted_model$data)) {
+      var_values <- fitted_model$data[[var_name]]
+      if (is.numeric(var_values) && length(var_values) > 0) {
+        return(range(var_values, na.rm = TRUE))
+      }
+    }
+  }
+  
+  # Try to get from model$data$mf (model frame)
+  if (!is.null(fitted_model$data$mf) && is.data.frame(fitted_model$data$mf)) {
+    if (var_name %in% names(fitted_model$data$mf)) {
+      var_values <- fitted_model$data$mf[[var_name]]
+      if (is.numeric(var_values) && length(var_values) > 0) {
+        return(range(var_values, na.rm = TRUE))
+      }
+    }
+  }
+  
+  # Try covariates slot if it exists
+  if (!is.null(fitted_model$covariates)) {
+    if (is.matrix(fitted_model$covariates) || is.data.frame(fitted_model$covariates)) {
+      if (var_name %in% colnames(fitted_model$covariates)) {
+        var_values <- fitted_model$covariates[, var_name]
+        if (is.numeric(var_values) && length(var_values) > 0) {
+          return(range(var_values, na.rm = TRUE))
+        }
+      }
+    }
+  }
+  
+  # Could not find the variable
+  return(NULL)
+}
+
+#' Find linear variable metadata in model metadata
+#' @keywords internal
+find_linear_metadata <- function(metadata, linear_var) {
+  
+  # Check if it's in linear_covariates
+  if (!is.null(metadata$linear_covariates) && 
+      linear_var %in% metadata$linear_covariates) {
+    
+    # Try to get range from metadata if available
+    var_range <- NULL
+    
+    return(list(
+      variable = linear_var,
+      is_linear = TRUE,
+      type = "linear",
+      var_range = var_range  # Will be filled from data if NULL
+    ))
+  }
+  
+  # Check in time_config for time variables that are linear
+  if (!is.null(metadata$time_config) && 
+      !is.null(metadata$time_config$variable) &&
+      metadata$time_config$variable == linear_var &&
+      metadata$time_config$type == "linear") {
+    
+    return(list(
+      variable = linear_var,
+      is_linear = TRUE,
+      type = "linear",
+      var_range = metadata$time_config$var_range
+    ))
+  }
+  
+  # Check if it's actually in final_covariates (not spline terms)
+  if (!is.null(metadata$final_covariates) && 
+      linear_var %in% metadata$final_covariates) {
+    
+    # Check it's not a spline term
+    is_spline <- is_spline_term(linear_var, metadata)
+    
+    if (!is_spline) {
+      return(list(
+        variable = linear_var,
+        is_linear = TRUE,
+        type = "linear",
+        var_range = NULL  # Will be filled from data
+      ))
+    }
+  }
+  
+  return(NULL)
+}
+
+#' Check if a variable name is a spline term
+#' @keywords internal
+is_spline_term <- function(var_name, metadata) {
+  # Check if it matches pattern like "var_ns1", "var_bs2", etc.
+  if (grepl("_(ns|bs)\\d+$", var_name)) {
+    return(TRUE)
+  }
+  
+  # Also check spline_metadata
+  if (!is.null(metadata$spline_config) && 
+      !is.null(metadata$spline_config$spline_metadata)) {
+    for (spline_info in metadata$spline_config$spline_metadata) {
+      if (var_name %in% spline_info$spline_terms) {
+        return(TRUE)
+      }
+    }
+  }
+  
+  return(FALSE)
+}
+
+#' Calculate confidence intervals for linear hazard ratios using delta method
+#' @keywords internal
+calculate_linear_hr_ci <- function(grid_values, reference_value, coef, linear_var,
+                                   vcov_matrix, from_state, to_state, 
+                                   ci_level, fitted_model) {
+  
+  # Get the Qmatrices to understand structure
+  Qmatrices <- fitted_model$Qmatrices
+  baseline_matrix <- Qmatrices$logbaseline
+  
+  # Identify all transitions in the order they appear in the coefficient vector
+  transitions_ordered <- get_valid_transitions_ordered(baseline_matrix)
+  
+  # Find which transition index this is
+  transition_idx <- which(transitions_ordered$from == from_state & 
+                            transitions_ordered$to == to_state)
+  
+  if (length(transition_idx) == 0) {
+    warning(paste("Could not find transition", from_state, "->", to_state))
+    return(list(
+      hr_lower = rep(NA_real_, length(grid_values)),
+      hr_upper = rep(NA_real_, length(grid_values))
+    ))
+  }
+  
+  # Find coefficient index for this linear variable and transition
+  # Structure: qbase (n_transitions), then for each covariate: qcov (n_transitions)
+  n_transitions <- nrow(transitions_ordered)
+  
+  # Find which covariate position this is (after baseline)
+  # Get list of covariates from Qmatrices (excluding logbaseline and baseline)
+  covariate_names <- setdiff(names(Qmatrices), c("logbaseline", "baseline"))
+  
+  covariate_idx <- which(covariate_names == linear_var)
+  
+  if (length(covariate_idx) == 0) {
+    warning(paste("Could not find covariate", linear_var, "in Qmatrices"))
+    return(list(
+      hr_lower = rep(NA_real_, length(grid_values)),
+      hr_upper = rep(NA_real_, length(grid_values))
+    ))
+  }
+  
+  # Calculate coefficient index
+  coef_idx <- n_transitions + (covariate_idx - 1) * n_transitions + transition_idx
+  
+  # Verify dimensions
+  if (coef_idx > nrow(vcov_matrix)) {
+    warning(paste("Coefficient index out of range for transition",
+                  from_state, "->", to_state))
+    return(list(
+      hr_lower = rep(NA_real_, length(grid_values)),
+      hr_upper = rep(NA_real_, length(grid_values))
+    ))
+  }
+  
+  # Get variance for this coefficient
+  var_coef <- vcov_matrix[coef_idx, coef_idx]
+  se_coef <- sqrt(var_coef)
+  
+  # For linear model: log HR = coef * (x - ref)
+  # Var(log HR) = (x - ref)^2 * Var(coef)
+  # SE(log HR) = |x - ref| * SE(coef)
+  
+  z_score <- qnorm(1 - (1 - ci_level) / 2)
+  
+  # Calculate SE and CI for each grid point
+  x_diff <- grid_values - reference_value
+  se_log_hr <- abs(x_diff) * se_coef
+  
+  # Log-HR point estimates
+  log_hr <- coef * x_diff
+  
+  # CI on log scale
+  log_hr_lower <- log_hr - z_score * se_log_hr
+  log_hr_upper <- log_hr + z_score * se_log_hr
+  
+  # Transform to HR scale
+  hr_lower <- exp(log_hr_lower)
+  hr_upper <- exp(log_hr_upper)
+  
+  return(list(
+    hr_lower = hr_lower,
+    hr_upper = hr_upper
+  ))
+}
+
 # Comprehensive wrapper for base performance metrics calculation ----
 
 run_comprehensive_msm_analysis <- function(fitted_msm_models, 
                                            patient_data, 
                                            crude_rates = NULL,  # Not used anymore but kept for compatibility
-                                           time_vec = seq(1, 30, by = 1),  # ADD THIS
+                                           time_vec = seq(1, 30, by = 1),
                                            analysis_config = list(),
                                            parallel = TRUE,
                                            mc.cores = NULL,
-                                           verbose = TRUE) {
+                                           verbose = TRUE,
+                                           auto_covariates = TRUE) {  # ADD THIS PARAMETER
   
   # Validate inputs
   if (!is.list(fitted_msm_models) || length(fitted_msm_models) == 0) {
@@ -2350,6 +3877,71 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
   # Merge user config with defaults
   config <- modifyList(default_config, analysis_config)
   
+  # ADD: Auto-covariate generation logic
+  if (auto_covariates) {
+    
+    # Check if covariate combinations need to be generated
+    needs_covariates <- any(
+      is.null(config$qmatrix$covariates_list),
+      is.null(config$pmats$covariates_list),
+      is.null(config$sojourns$covariates_list)
+    )
+    
+    if (needs_covariates && verbose) {
+      cat("Analyzing models for auto-covariate generation...\n")
+    }
+    
+    if (needs_covariates) {
+      
+      # Determine analysis type by examining model structure
+      is_univariate <- is_univariate_analysis(fitted_msm_models)
+      
+      if (is_univariate) {
+        if (verbose) {
+          cat("Detected univariate analysis - skipping covariate combinations\n")
+          cat("Covariate effects available through hazard ratios\n")
+        }
+        # Keep covariates_list as NULL for univariate analyses
+        
+      } else {
+        if (verbose) {
+          cat("Detected multivariate analysis - generating covariate combinations\n")
+        }
+        
+        # Generate appropriate covariate combinations
+        covariate_combinations <- tryCatch({
+          generate_model_aware_covariate_combinations(
+            fitted_msm_models = fitted_msm_models,
+            patient_data = patient_data
+          )
+        }, error = function(e) {
+          if (verbose) {
+            cat("Warning: Could not generate covariate combinations:", e$message, "\n")
+            cat("Proceeding without covariate combinations...\n")
+          }
+          NULL
+        })
+        
+        if (!is.null(covariate_combinations) && length(covariate_combinations) > 0) {
+          if (verbose) {
+            cat("Generated", length(covariate_combinations), "covariate combinations\n")
+          }
+          
+          # Update config
+          if (is.null(config$qmatrix$covariates_list)) {
+            config$qmatrix$covariates_list <- covariate_combinations
+          }
+          if (is.null(config$pmats$covariates_list)) {
+            config$pmats$covariates_list <- covariate_combinations
+          }
+          if (is.null(config$sojourns$covariates_list)) {
+            config$sojourns$covariates_list <- covariate_combinations
+          }
+        }
+      }
+    }
+  }
+  
   # Initialize results list
   results <- list(
     metadata = list(
@@ -2358,7 +3950,8 @@ run_comprehensive_msm_analysis <- function(fitted_msm_models,
       total_models = sum(sapply(fitted_msm_models, length)),
       config = config,
       parallel = parallel,
-      mc.cores = mc.cores
+      mc.cores = mc.cores,
+      auto_covariates = auto_covariates
     )
   )
   

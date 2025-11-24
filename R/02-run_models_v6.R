@@ -5,25 +5,22 @@ library(tidyverse)
 library(msm)
 
 source(here("R", "00-config.R"))
-source(here("R", "00a-fns-model_fitting.R"))
-source(here("R", "00b-fns-model_eval.R"))
-source(here("R", "00c-fns-predictive_performance.R"))
+source(here("R", "00c-fns-model_fitting.R"))
+source(here("R", "00d-fns-model_eval.R"))
+source(here("R", "00e-fns-predictive_performance.R"))
 
 # Workflow config --------------------------------------------------------------
 
 workflow_config <- list(
-  
-  data_setup = list(
-    run = FALSE
-  ),
-  
+
   # Which analysis sections to run
   sections = c(
     # "base"           # Base models (no covariates)
-    # "markov",         # Markov assumption check
-    "univar",         # Univariate covariate effects
-    "univar_const"   # Univariate with constant transitions
-    # "multivar",     # Multivariable models (not implemented)
+    "markov"         # Markov assumption check
+    # "univar",         # Univariate covariate effects
+    # "univar_const",   # Univariate with constant transitions
+    # "univar_deep_dive"
+    # "multivar"     # Multivariable models (not implemented)
     # "time_inhomog"    # Time-inhomogeneous models
     # "long_stay"     # Long-stay sensitivity analysis
   ),
@@ -37,25 +34,32 @@ workflow_config <- list(
   ),
   
   markov = list(
+    fit = TRUE,
+    compile = TRUE,
+    compare = TRUE,
+    cv = TRUE
+  ),
+  
+  univar = list(
     fit = FALSE,
     compile = FALSE,
+    retry_failed = FALSE,  # Unlimited-time retry for failed models
     compare = FALSE,
     cv = FALSE
   ),
   
-  univar = list(
-    fit = TRUE,
-    compile = TRUE,
-    retry_failed = FALSE,  # Unlimited-time retry for failed models
-    compare = TRUE,
+  univar_const = list(
+    fit = FALSE,
+    compile = FALSE,
+    retry_failed = FALSE,
+    compare = FALSE,
     cv = FALSE
   ),
   
-  univar_const = list(
-    fit = TRUE,
-    compile = TRUE,
-    retry_failed = FALSE,
-    compare = TRUE,
+  univar_deep_dive = list(
+    fit = FALSE,
+    compile = FALSE,
+    compare = FALSE,
     cv = FALSE
   ),
   
@@ -77,13 +81,13 @@ workflow_config <- list(
   comparisons = list(
     # Compare base models across structures
     base_structures = list(
-      run = TRUE,
+      run = FALSE,
       methods = c("draic", "drlcv")
     ),
     
     # Compare markov models within base structure
     markov_within = list(
-      run = FALSE,
+      run = TRUE,
       methods = c("lrt")  # Likelihood ratio test for nested models
     ),
     
@@ -121,21 +125,26 @@ analysis_configs <- list(
     ),
     hazards = list(skip = TRUE),  # No covariates
     cv = list(skip = TRUE),  # Handled separately
-    residuals = list(residual_type = "deviance", debug = FALSE)
+    residuals = list(residual_type = "deviance", debug = FALSE),
+    auto_covariates = FALSE
   ),
   
   markov = list(
     tidy_models = list(),
-    qmatrix = list(covariates_list = NULL, mc.cores = n.cores),
-    pmats = list(t_values = time_vec, covariates_list = NULL, mc.cores = n.cores),
-    sojourns = list(covariates_list = NULL),
+    qmatrix = list(covariates_list = NULL, mc.cores = n.cores,
+                   ci_method = "bootstrap"),
+    pmats = list(t_values = time_vec, covariates_list = NULL, mc.cores = n.cores,
+                 ci_method = "bootstrap"),
+    sojourns = list(covariates_list = NULL,
+                    ci_method = "bootstrap"),
     prevalence = list(
       time_points = time_vec,
       covariates_list = NULL,
       ci = TRUE,
-      ci_method = "normal",
+      # ci_method = "normal",
       use_approximation = FALSE,
-      mc.cores = n.cores
+      mc.cores = n.cores,
+      ci_method = "normal"
     ),
     hazards = list(hazard_scale = 1),
     cv = list(skip = TRUE),
@@ -144,30 +153,86 @@ analysis_configs <- list(
   
   univar = list(
     tidy_models = list(),
-    qmatrix = list(covariates_list = NULL, mc.cores = n.cores,
-                   ci_method = "bootstrap"),
-    pmats = list(t_values = time_vec, covariates_list = NULL, mc.cores = n.cores,
-                 ci_method = "bootstrap"),
-    sojourns = list(covariates_list = NULL,
-                    ci_method = "bootstrap"),
-    prevalence = list(skip = TRUE),  # Too many models
-    hazards = list(hazard_scale = 1),
-    cv = list(skip = TRUE),
-    residuals = list(skip = TRUE)
+    qmatrix = list(
+      # covariates_list = NULL, mc.cores = n.cores, ci_method = "bootstrap",
+      skip = TRUE
+      ),
+    pmats = list(
+      # t_values = time_vec, covariates_list = NULL, mc.cores = n.cores, ci_method = "bootstrap",
+      skip = TRUE
+      ),
+    sojourns = list(
+      # covariates_list = NULL, ci_method = "bootstrap",
+      skip = TRUE
+      ),
+    prevalence = list(
+      skip = TRUE
+      ),  # Too many models
+    hazards = list(
+      hazard_scale = 1
+      ),
+    cv = list(
+      skip = TRUE
+      ),
+    residuals = list(
+      skip = TRUE
+      )
   ),
   
   univar_const = list(
     tidy_models = list(),
-    qmatrix = list(covariates_list = NULL, mc.cores = n.cores,
-                   ci_method = "bootstrap"),
-    pmats = list(t_values = time_vec, covariates_list = NULL, mc.cores = n.cores,
-                 ci_method = "bootstrap"),
-    sojourns = list(covariates_list = NULL,
-                    ci_method = "bootstrap"),
-    prevalence = list(skip = TRUE),
-    hazards = list(hazard_scale = 1),
-    cv = list(skip = TRUE),
-    residuals = list(skip = TRUE)
+    qmatrix = list(
+      # covariates_list = NULL, mc.cores = n.cores, ci_method = "bootstrap",
+      skip = TRUE
+    ),
+    pmats = list(
+      # t_values = time_vec, covariates_list = NULL, mc.cores = n.cores, ci_method = "bootstrap",
+      skip = TRUE
+    ),
+    sojourns = list(
+      # covariates_list = NULL, ci_method = "bootstrap",
+      skip = TRUE
+    ),
+    prevalence = list(
+      skip = TRUE
+    ),  # Too many models
+    hazards = list(
+      hazard_scale = 1
+    ),
+    cv = list(
+      skip = TRUE
+    ),
+    residuals = list(
+      skip = TRUE
+    )
+  ),
+  
+  univar_deep_dive = list(
+    tidy_models = list(),
+    qmatrix = list(
+      covariates_list = NULL, mc.cores = n.cores, ci_method = "bootstrap"
+      # skip = TRUE
+    ),
+    pmats = list(
+      t_values = time_vec, covariates_list = NULL, mc.cores = n.cores, ci_method = "bootstrap"
+      # skip = TRUE
+    ),
+    sojourns = list(
+      covariates_list = NULL, ci_method = "bootstrap"
+      # skip = TRUE
+    ),
+    prevalence = list(
+      skip = TRUE
+    ),  # Too many models
+    hazards = list(
+      hazard_scale = 1
+    ),
+    cv = list(
+      skip = TRUE
+    ),
+    residuals = list(
+      # skip = TRUE
+    )
   ),
   
   time_inhomog = list(
@@ -185,7 +250,8 @@ analysis_configs <- list(
     ),
     hazards = list(skip = TRUE),
     cv = list(skip = TRUE),
-    residuals = list(residual_type = "deviance", debug = FALSE)
+    residuals = list(residual_type = "deviance", debug = FALSE),
+    auto_covariates = FALSE
   )
 )
 
@@ -228,6 +294,15 @@ cv_configs <- list(
     n_cores = n.cores
   ),
   
+  univar_deep_dive = list(
+    k_folds = 5,
+    stratify_by = "final_state",
+    prediction_horizon = 365,
+    output_dir = here("data", "cv_results", "univar_deep_dive"),
+    parallel = TRUE,
+    n_cores = n.cores
+  ),
+  
   time_inhomog = list(
     k_folds = 5,
     stratify_by = "final_state",
@@ -241,67 +316,13 @@ cv_configs <- list(
 
 # Data prep --------------------------------------------------------------------
 
-if (workflow_config$data_setup$run) {
-  cat("\n=== PREPARING DATA ===\n")
-  
-  # Load raw data
-  dem_raw <- readRDS(here("data", "pt_demographics.rds"))
-  stg_raw <- readRDS(here("data", "pt_enc_staging.rds"))
-  model_specs_raw <- read_csv(here("data", "model-specs.csv"))
-  
-  # Process model specifications
-  model_specs <- model_specs_raw %>%
-    mutate(stage = strsplit(as.character(stage), ", ")) %>% 
-    unnest(stage) %>%
-    mutate(hx_sev_bin = strsplit(as.character(hx_sev_bin), ", ")) %>% 
-    unnest(hx_sev_bin) %>%
-    mutate(stage = as.integer(stage), hx_sev_bin = as.integer(hx_sev_bin))
-  
-  # Create patient staging data with history of severity
-  pt_stg <- stg_raw %>% 
-    group_by(deid_enc_id) %>%
-    mutate(severe_bin = ifelse(stage %in% 7:9, 1, 0)) %>%
-    mutate(hx_sev_time = slider::slide_index_sum(
-      x = severe_bin,
-      i = date,
-      before = lubridate::days(365)
-    )) %>%
-    mutate(hx_sev_bin = ifelse(hx_sev_time > 0, 1, 0)) %>%
-    select(-severe_bin) %>% 
-    ungroup()
-  
-  # Join with model specifications and demographics
-  pt_stg <- pt_stg %>% 
-    cross_join(tibble(model = unique(model_specs$model))) %>%
-    left_join(model_specs, by = c("stage", "hx_sev_bin", "model")) %>%
-    add_calendar_time(date_column = "date") %>%
-    left_join(dem_raw, by = "deid_enc_id") %>%
-    arrange(deid_enc_id, date)
-  
-  # Calculate crude rates
-  source(here("R", "00-qmat_setup.R"))
-  crude_rates <- calc_crude_init_rates(pt_stg, qmat_list)
-  
-  # Save processed data
-  saveRDS(pt_stg, here("data", "pt_stg.rds"), compress = FALSE)
-  saveRDS(crude_rates, here("data", "crude_rates.rds"))
-  
-  rm(dem_raw, stg_raw, model_specs_raw, model_specs, qmat_list)
-  
-  cat("Data preparation complete.\n")
-  cat("  N patients:", length(unique(pt_stg$deid_enc_id)), "\n")
-  cat("  N observations:", nrow(pt_stg), "\n")
-  
-} else {
-  cat("\n=== LOADING PREPARED DATA ===\n")
-  pt_stg <- readRDS(here("data", "pt_stg.rds"))
-  crude_rates <- readRDS(here("data", "crude_rates.rds"))
-  
-  cat("Data loaded.\n")
-  cat("  N patients:", length(unique(pt_stg$deid_enc_id)), "\n")
-  cat("  N observations:", nrow(pt_stg), "\n")
-}
+cat("\n=== LOADING PREPARED DATA ===\n")
+pt_stg <- readRDS(here("data", "pt_stg.rds"))
+crude_rates <- readRDS(here("data", "crude_rates.rds"))
 
+cat("Data loaded.\n")
+cat("  N patients:", length(unique(pt_stg$deid_enc_id)), "\n")
+cat("  N observations:", nrow(pt_stg), "\n")
 
 # Base model structures (no covariates) ----------------------------------------
 
@@ -389,33 +410,71 @@ if ("markov" %in% workflow_config$sections) {
       
       markov_model_specs <- tibble(
         model_name = c(
-          "base_no_cov",
+          # "base_no_cov",
+          # "markov_state",
           "base_time_severe", 
           "base_time_severe_spline",
-          "base_time_severe_const"
+          "base_time_severe_const",
+          "base_time_state",
+          "base_time_state_spline",
+          "base_time_state_const"
         ),
         model_structure = c(
-          "base_model",
+          # "base_model",
+          # "hx_sev",
           "base_model", 
           "base_model",
+          "base_model", 
+          "base_model", 
+          "base_model", 
           "base_model"
         ),
         covariates = list(
-          NULL,
+          # NULL,
+          # NULL,
           c("hx_sev_time"),
           NULL,
-          c("hx_sev_time")
+          c("hx_sev_time"),
+          c("time_in_current_state"),
+          NULL,
+          c("time_in_current_state")
         ),
         spline_vars = list(
-          NULL,
+          # NULL,
+          # NULL,
           NULL,
           c("hx_sev_time"),
+          NULL,
+          NULL,
+          c("time_in_current_state"),
           NULL
         ),
-        spline_df = c(NA, NA, 3, NA),
-        spline_type = c(NA, NA, "ns", NA),
+        spline_df = c(
+          # NA, 
+          # NA, 
+          NA, 
+          3, 
+          NA,
+          NA,
+          3,
+          NA
+          ),
+        spline_type = c(
+          # NA, 
+          # NA, 
+          NA, 
+          "ns", 
+          NA,
+          NA,
+          "ns",
+          NA
+          ),
         constraint = c(
+          # "transition_specific",
+          # "transition_specific",
           "transition_specific",
+          "transition_specific",
+          "constant_across_transitions",
           "transition_specific",
           "transition_specific",
           "constant_across_transitions"
@@ -464,7 +523,7 @@ if ("markov" %in% workflow_config$sections) {
         if (nrow(markov_within_comp) > 0) {
           cat("\nMarkov Model Rankings (by AIC):\n")
           print(markov_within_comp %>% 
-                  select(model_name, model_structure, AIC, BIC, aic_rank) %>%
+                  dplyr::select(model_name, model_structure, AIC, BIC, aic_rank) %>%
                   arrange(aic_rank))
         }
       }
@@ -702,6 +761,61 @@ if ("univar_const" %in% workflow_config$sections) {
   gc()
 }
 
+## Deep-dive on selected covariates ---------------------------------------------
+
+if ("univar_deep_dive" %in% workflow_config$sections) {
+  
+  deep_dive_covariates <- c("age", "age_cat")
+  
+  univar_models <- readRDS(here("data", "univar_models.rds"))
+  deep_dive_models <- list(
+    "base_model_age_spline" = univar_models[["base_model_age_spline"]],
+    "base_model_age_cat" = univar_models[["base_model_age_cat_linear"]],
+    "base_model_age_linear" = univar_models[["base_model_age_linear"]]
+  )
+
+  # Compile results
+  if (workflow_config$univar_deep_dive$compile && !is.null(deep_dive_models)) {
+    deep_dive_comp <- compile_section(
+      "univar_deep_dive",
+      deep_dive_models,
+      analysis_configs$univar_deep_dive
+    )
+  }
+  
+  # Cross-validation
+  if (workflow_config$univar_deep_dive$cv && !is.null(deep_dive_models)) {
+    deep_dive_cv <- run_cv_section(
+      "univar_deep_dive",
+      deep_dive_models,
+      cv_configs$univar_deep_dive
+    )
+  }
+  
+  gc()
+  
+}
+  
+# Multivariable model selection -------------------------------------------------
+
+if ("multivar" %in% workflow_config$sections) {
+  cat("RUNNING: MULTIVARIABLE MODEL SELECTION\n")
+
+  forward_results <- forward_selection_msm(
+    patient_data = pt_stg,
+    crude_rates = crude_rates,
+    univar_model_summary = univar_comp$model_summary,  # Now uses 'formula' column
+    candidate_vars = key_covariates,
+    spline_vars = continuous_covariates,
+    model_structures = "base_model",
+    mc.cores = n.cores,
+    timeout_minutes = 30,
+    save_prefix = "forward_selection"
+  )
+
+  gc()
+}
+
 # Time-homogeneity assumption ------------------------------------------------------
 
 if ("time_inhomog" %in% workflow_config$sections) {
@@ -752,7 +866,6 @@ if ("long_stay" %in% workflow_config$sections) {
   
   gc()
 }
-
 
 # Summary -----------------------------------------------------------------------
 

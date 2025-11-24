@@ -16,12 +16,13 @@ library(stringr)
 library(future)
 library(future.apply)
 library(R.utils)
+library(patchwork)
 
 # Set options and parameters -----------------------------------------------
 
 options(readr.show_col_types = FALSE)
 
-n.cores = 10
+n.cores = 6
 # setOption("future.globals.maxSize", 891289600) # 850MB
 
 time_vec <- c(1, 7, 15, 30)
@@ -30,19 +31,19 @@ time_vec <- c(1, 7, 15, 30)
 
 continuous_covariates <- c("age", "cci_score", "BMI")
 
-key_covariates <- c("age", "sex", "race", "ethnicity", "language", 
+key_covariates <- c("age", "age_cat", "sex", "race", "ethnicity", "language", 
                     "insurance_type", "smoking", "BMI", "bmi_cat", 
-                    "COVID_vax", "cci_score", "chf", "cci_cat", 
-                    "copd", "dnr_on_admit")
+                    "vax", "cci_score", "chf", "cci_cat", 
+                    "copd", "dnr_on_admit", "COVID_tx")
 
-key_covariates_labels <- c("Age", "Sex", "Race", "Ethnicity", "Language", 
+key_covariates_labels <- c("Age", "Age category", "Sex", "Race", "Ethnicity", "Language", 
                            "Insurance type", "Smoking status", "BMI", "BMI category", 
                            "COVID-19 vaccination", "Charlson comorbidity index", "CHF", "CCI category", 
-                           "COPD", "DNR on admission")
+                           "COPD", "DNR on admission", "COVID-19 treatment")
 
 # Sections to run ----------------------------------------------------------
 
-run_data_setup <- FALSE
+run_data_setup <- TRUE
 
 
 
@@ -149,6 +150,8 @@ models <- c(
 #   "black",
 #   
 # )
+
+
 
 models_df <- tibble(
   model = names(models),
