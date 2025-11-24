@@ -1,0 +1,780 @@
+---
+title: "Multi-State Model Analysis: Covariates"
+date: today
+format:
+  html:
+    df-print: paged
+    toc: true
+    toc-float: true
+    toc-depth: 3
+    code-fold: true
+    theme: default
+    embed-resources: true
+editor: source
+editor_options: 
+  markdown: 
+    wrap: 72
+execute:
+  cache: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+rm(list = ls())
+
+library(here)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(tableone)
+library(Hmisc)
+library(ggpubr)
+library(viridis)
+library(gridExtra)
+library(grid)
+
+```
+
+```{r}
+#| label: load-data
+#| include: false
+
+source(here("R", "00-config.R"))
+source(here("R", "00f-fns-tbl_figs.R"))
+source(here("R", "00d-fns-model_eval.R"))
+
+pt_stg <- readRDS(here("data", "pt_stg.rds"))
+
+crude_rates <- readRDS(here("data", "crude_rates.rds"))
+
+base_comp <- readRDS(here("data", "base_comp.rds"))
+
+univar_models <- readRDS(here("data", "univar_models.rds"))
+univar_comp <- readRDS(here("data", "univar_comp.rds"))
+
+univar_const_models <- readRDS(here("data", "univar_const_models.rds"))
+univar_const_comp <- readRDS(here("data", "univar_const_comp.rds"))
+
+deep_dive_comp <- readRDS(here("data", "univar_deep_dive_comp.rds"))
+```
+
+```{r}
+#| label: table-one-data
+#| echo: true
+
+tab_one_dat <- pt_stg %>%
+  dplyr::filter(model == "base_model", state %in% c("M", "S")) %>%
+  group_by(deid_enc_id) %>%
+  mutate(ever_dnr = ifelse(any(DNR == 1), 1, 0)) %>%
+  ungroup() %>%
+  distinct() %>%
+  mutate(copd = ifelse(copd == 1, TRUE, FALSE),
+         absorbing_state = ifelse(end_in_death == "Yes", "Death", "Recovery")) %>%
+  mutate(across(c(copd, vax, stage, state), as.factor))
+
+cov_tx_days <- tab_one_dat %>%
+  mutate(cov_tx = ifelse(COVID_tx == "No treatment", 0, 1)) %>%
+  group_by(deid_enc_id) %>%
+  dplyr::summarize(tx_days = sum(cov_tx, na.rm = TRUE), .groups = "drop")
+
+stg_days_enc <- tab_one_dat %>%
+  group_by(deid_enc_id, state) %>%
+  dplyr::summarize(days_in_state = n(), .groups = "drop") %>%
+  dplyr::filter(state %in% c("M", "S")) %>%
+  pivot_wider(names_from = state, values_from = days_in_state,
+              names_prefix = "days_in_") %>%
+  replace_na(list(days_in_M = 0, days_in_S = 0))
+
+entry_stage <- tab_one_dat %>%
+  group_by(deid_enc_id) %>%
+  dplyr::filter(DaysSinceEntry == 0) %>%
+  dplyr::select(deid_enc_id, state) %>%
+  rename(entry_state = state)
+
+n_pat_enc <- tab_one_dat %>%
+  dplyr::select(deid_pat_id, deid_enc_id) %>%
+  distinct() %>%
+  group_by(deid_pat_id) %>%
+  dplyr::summarize(n_enc = n())
+
+```
+
+```{r}
+#| label: table-one-prep
+#| echo: true
+
+demographics <- c(
+  "age" = "Age (years)",
+  "sex" = "Sex", 
+  "race" = "Race",
+  "ethnicity" = "Ethnicity",
+  "language" = "Preferred Language",
+  "insurance_type" = "Insurance Type"
+)
+
+clinical_risk <- c(
+  "smoking" = "Smoking Status",
+  "BMI" = "BMI",
+  "bmi_cat" = "BMI Category", 
+  "cci_score" = "CCI (Score)",
+  "cci_cat" = "CCI (Category)",
+  "chf" = "CHF",
+  "copd" = "COPD",
+  "vax" = "COVID Vaccination"
+)
+
+encounter_chars <- c(
+  "tx_days" = "Days with COVID Treatment",
+  "days_in_M" = "Days in Moderate State",
+  "days_in_S" = "Days in Severe State",
+  "LOS" = "Length of Stay (days)",
+  "dnr_on_admit" = "DNR on Admission",
+  "absorbing_state" = "Absorbing State"
+)
+
+tab_one_enc_var_labels <- c(demographics, clinical_risk, encounter_chars)
+tab_one_enc_vars <- names(tab_one_enc_var_labels)
+
+
+tab_one_enc_dat <- tab_one_dat %>%
+  dplyr::select(deid_enc_id, any_of(tab_one_enc_vars)) %>%
+  distinct() %>%
+  # dplyr::select(-state) %>%
+  left_join(cov_tx_days, by = "deid_enc_id") %>%
+  left_join(entry_stage, by = "deid_enc_id") %>%
+  left_join(stg_days_enc, by = "deid_enc_id", relationship = "many-to-many") 
+
+for(var in tab_one_enc_vars) {
+  if(var %in% names(tab_one_enc_dat)) {
+    label(tab_one_enc_dat[[var]]) <- tab_one_enc_var_labels[[var]]
+  }
+}
+
+```
+
+```{r}
+#| label: table-one-encounters
+#| echo: true
+
+enc_tab_one_ent <- CreateTableOne(vars = tab_one_enc_vars, 
+                              data = tab_one_enc_dat, 
+                              strata = c("entry_state"),
+                              addOverall = TRUE
+                              )
+
+enc_tab_one_abs <- CreateTableOne(vars = tab_one_enc_vars, 
+                              data = tab_one_enc_dat, 
+                              strata = c("absorbing_state"),
+                              addOverall = FALSE
+                              )
+
+mat_ent <- print(enc_tab_one_ent, printToggle = FALSE, varLabels = TRUE, 
+                 pDigits = 3, formatOptions = list(big.mark = ","),
+                 missing = TRUE)
+mat_abs <- print(enc_tab_one_abs, printToggle = FALSE, varLabels = TRUE, 
+                 pDigits = 3, formatOptions = list(big.mark = ","),
+                 missing = TRUE)
+
+mat_ent_clean <- mat_ent[, c("Overall", "M", "S", "p")]
+mat_abs_clean <- mat_abs[, c("Death", "Recovery", "p")]
+
+colnames(mat_ent_clean)[4] <- "p_entry"
+colnames(mat_abs_clean)[3] <- "p_absorbing"
+
+combined_mat <- cbind(mat_ent_clean, mat_abs_clean)
+
+modified_mat <- combined_mat
+row_names <- rownames(modified_mat)
+
+modified_mat <- modified_mat[-47,]
+
+p_cols <- grep("p_", colnames(modified_mat))
+for(col in p_cols) {
+  modified_mat[, col] <- gsub("<", "&lt;", modified_mat[, col])
+  modified_mat[, col] <- gsub(">", "&gt;", modified_mat[, col])
+}
+
+# Find rows that start with spaces and wrap them in span with CSS
+category_rows <- which(grepl("^   ", row_names))
+for(i in category_rows) {
+  rownames(modified_mat)[i] <- paste0('<span style="padding-left: 2em;">', 
+                                      trimws(rownames(modified_mat)[i]), 
+                                      '</span>')
+}
+
+kable1 <- kableone(modified_mat, format = "html", escape = FALSE) %>%
+  kable_styling() %>%
+  add_header_above(c(" " = 1, "Overall" = 1, 
+                     "Entry State" = ncol(mat_ent_clean) - 1, 
+                     "Absorbing State" = ncol(mat_abs_clean))) %>%
+  pack_rows("Demographics", 2, 22,
+            indent = TRUE, label_row_css = "font-weight: bold") %>%
+  pack_rows("Risk Factors", 23, 41,
+            indent = TRUE, label_row_css = "font-weight: bold") %>%
+  pack_rows("Encounter Characteristics", 42, 46,
+            indent = TRUE, label_row_css = "font-weight: bold")
+
+save_kable(kable1, here("figs", "table_one_encounters.png"))
+
+```
+
+
+```{r}
+#| label: univar-log-likelihood-plot
+
+base_loglik <- base_comp$model_summary %>%
+  dplyr::filter(model_name == "base_model") %>%
+  dplyr::select(has_splines, constraint_type, n_obs, n_params, AIC, BIC, loglik) %>%
+  mutate(base_variables = "No cov") %>%
+  mutate(has_splines = ifelse(has_splines, "Yes", "No"))
+
+univar_all_comp <- univar_comp$model_summary %>%
+  bind_rows(univar_const_comp$model_summary) %>%
+  dplyr::select(base_variables, has_splines, constraint_type, n_obs, n_params, AIC, BIC, loglik) %>%
+  mutate(base_variables = unlist(base_variables)) %>%
+  mutate(has_splines = ifelse(has_splines, "Yes", "No")) %>%
+  bind_rows(base_loglik)
+
+# kable(univar_all_comp, 
+#       col.names = c("Covariates", "Splines", "Constraint", 
+#                     "# Observations", "# Parameters", "AIC", "BIC", "Log-Likelihood"),
+#       caption = "Comparison of univariate multi-state models with different covariates and constraints")
+
+univar_all_comp_long <- univar_all_comp %>%
+  pivot_longer(cols = c(n_obs, n_params, AIC, BIC, loglik), 
+               names_to = "metric", values_to = "value") %>%
+  mutate(metric = factor(metric, levels = c("n_params", "n_obs", "loglik", "AIC", "BIC"), ordered = TRUE))
+
+base_novar <- univar_all_comp_long %>%
+  dplyr::filter(base_variables == "No cov")
+
+univar_all_comp_long <- univar_all_comp_long %>%
+  dplyr::filter(base_variables != "No cov")
+
+univar_loglik <- ggplot(univar_all_comp_long, aes(x = base_variables, y = value)) +
+  geom_point(aes(color = constraint_type, shape = has_splines),
+             position = position_dodge(width = 0.5), size = 3) +
+  geom_hline(data = base_novar, aes(yintercept = value), linetype = "dashed") +
+  facet_wrap(~ metric, scales = "free_y", ncol = 1, 
+             labeller = as_labeller(c(loglik = "Log-Likelihood", n_obs = "Number of observations", n_params = "Number of parameters", AIC = "AIC", BIC = "BIC"))) +
+  labs(x = "Covariates", y = "Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "bottom") +
+  scale_x_discrete(breaks = key_covariates, labels = key_covariates_labels) +
+  scale_shape_manual(values = c(16, 17), labels = c("Linear term", "Spline term")) +
+  scale_color_discrete(labels = c("Constrained", "Unconstrained"), 
+                       breaks = c("constant_across_transitions", "transition_specific"))
+
+ggsave(here("figs", "univar_loglik_plot.png"), univar_loglik, width = 9, height = 7)
+
+```
+
+```{r}
+#| label: age-distribution
+
+mean_age <- pt_stg %>%
+  dplyr::filter(model == "base_model") %>%
+  dplyr::select(deid_enc_id, age) %>%
+  distinct() %>%
+  dplyr::summarize(mean_age = mean(age, na.rm = TRUE), .by = NULL) %>%
+  pull(mean_age)
+
+base_dat <- pt_stg %>%
+  dplyr::filter(model == "base_model") %>%
+  dplyr::select(deid_enc_id, age) %>%
+  distinct()
+
+age_hist <- ggplot(base_dat, aes(x = age)) +
+  geom_histogram(binwidth = 5, fill = "grey80", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = mean_age, linetype = "dotted") +
+  xlim(c(0, 105)) +
+  labs(x = "", y = "count") +
+  theme_minimal() +
+  theme(plot.margin = margin(t = 5, r = 5, b = 0, l = 5, unit = "pt"))
+
+age_boxplot <- ggplot(base_dat, aes(x = age)) +
+  geom_boxplot(fill = "grey80", color = "black", alpha = 0.7) +
+  xlim(c(0, 105)) +
+  labs(x = "Age (years)", y = "") +
+  theme_minimal() +
+  theme(axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.margin = margin(t = 0, r = 5, b = 5, l = 5, unit = "pt"))
+
+age_hist / age_boxplot
+
+```
+
+```{r}
+#| label: age-loglil
+
+age_model_colors <- tibble(
+  model_name = c("Linear", "Categorical", "Spline"),
+  color = c("#440154FF", "#21908CFF", "#FDE725FF"),
+)
+
+logl_dat <- deep_dive_comp$model_summary %>%
+  dplyr::select(model_name, has_splines, constraint_type, n_obs, n_params, AIC, BIC, loglik) %>%
+  rbind(base_loglik %>% dplyr::select(-base_variables) %>% mutate(model_name = "base_model")) %>%
+  rbind(univar_comp$model_summary %>% dplyr::filter(grepl("~ age", formula)) %>%
+      dplyr::select(model_name, has_splines, constraint_type, n_obs, n_params, AIC, BIC, loglik)) %>%
+  rbind(univar_const_comp$model_summary %>% dplyr::filter(grepl("~ age", formula)) %>%
+      dplyr::select(model_name, has_splines, constraint_type, n_obs, n_params, AIC, BIC, loglik)) %>%
+  mutate(age_var_type = ifelse(grepl("age_cat", model_name), "Categorical", "Continuous")) %>%
+  mutate(has_splines = ifelse(has_splines, "Yes", "No")) %>%
+  pivot_longer(cols = c(n_obs, n_params, AIC, BIC, loglik), 
+               names_to = "metric", values_to = "value") %>%
+  mutate(metric = factor(metric, levels = c("n_params", "n_obs", "loglik", "AIC", "BIC"), ordered = TRUE))
+
+base_logl <- logl_dat %>%
+  dplyr::filter(model_name == "base_model")
+
+logl_dat <- logl_dat %>%
+  dplyr::filter(model_name != "base_model") %>%
+  mutate(model_label = substr(model_name, 12, nchar(model_name))) %>%
+  dplyr::filter(model_label != "age_cat")
+
+age_logl <- ggplot(subset(logl_dat, metric != "n_obs"), aes(x = model_label, y = value)) +
+  geom_point(aes(color = model_label, shape = constraint_type), size = 3) +
+  geom_hline(data = base_logl, aes(yintercept = value), linetype = "dashed") +
+  labs(x = "Covariates", y = "Log-Likelihood") +
+  theme_minimal() +
+  theme(axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "bottom") +
+  facet_wrap(~ metric, scales = "free_y", ncol = 1, 
+             labeller = as_labeller(c(loglik = "Log-Likelihood", n_params = "Number of parameters", 
+                                      AIC = "AIC", BIC = "BIC"))) +
+  scale_color_manual(breaks = c("age_cat_linear", "age_linear", "age_spline"),
+                   labels = c("Age (categorical)", "Age (linear)", "Age (spline)"),
+                   values = c("#21908CFF", "#440154FF", "#FDE725FF")) +
+  scale_x_discrete(breaks = c("age_cat_linear", "age_linear", "age_spline"),
+                   labels = c("Age (categorical)", "Age (linear)", "Age (spline)")) +
+  scale_shape_manual(values = c(16, 17), labels = c("Constrained", "Unconstrained"),
+                     breaks = c("constant_across_transitions", "transition_specific"))
+
+age_logl_nc <- ggplot(subset(logl_dat, constraint_type == "transition_specific" & metric != "n_obs"), 
+                      aes(x = model_label, y = value)) +
+  geom_point(aes(color = model_label), size = 3) +
+  geom_hline(data = subset(base_logl, metric != "n_obs"), aes(yintercept = value), linetype = "dashed") +
+  labs(x = "Covariates", y = "Log-Likelihood") +
+  theme_minimal() +
+  theme(axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        strip.background = element_rect(fill = "grey90", color = NA)) +
+  facet_wrap(~ metric, scales = "free_y", ncol = 1, 
+             labeller = as_labeller(c(loglik = "Log-Likelihood", n_params = "Number of parameters", 
+                                      AIC = "AIC", BIC = "BIC"))) +
+  scale_color_manual(breaks = c("age_cat_linear", "age_linear", "age_spline"),
+                   labels = c("Age (categorical)", "Age (linear)", "Age (spline)"),
+                   values = c("#FDE725FF", "#440154FF", "#21908CFF")) +
+  scale_x_discrete(breaks = c("age_cat_linear", "age_linear", "age_spline"),
+                   labels = c("Age (categorical)", "Age (linear)", "Age (spline)")) +
+  scale_y_continuous(n.breaks = 4) +
+  guides(color = "none")
+
+age_logl_nc
+```
+
+```{r}
+#| label: age-hrs
+
+age_hazards <- univar_comp$hazards %>%
+  rbind(univar_const_comp$hazards) %>%
+  dplyr::filter(original_variable %in% c("age", "age_cat")) %>%
+  dplyr::filter(has_splines == FALSE)
+
+x_min <- 0.01
+x_max <- 100
+
+# Create a shared position_dodge object
+pd <- position_dodge(width = 0.6)
+
+age_quintile_colors <- tibble(
+  model_term = c("age", "age_catQ2", "age_catQ3", "age_catQ4", "age_catQ5"),
+  model_label = c("Age (per year);\nLinear model", "Age Q2: 39-54 y", "Age Q3: 54-65 y", "Age Q4: 65-77 y", "Age Q5: 77-104 y"),
+  color = c("#440154FF", viridis(4, option = "mako"))
+)
+
+# Flag which error bars exceed limits and clip them
+age_hazards_plot <- age_hazards %>%
+  mutate(
+    lower_exceeds = hr_lower < x_min,
+    upper_exceeds = hr_upper > x_max,
+    hr_lower_clipped = pmax(hr_lower, x_min),
+    hr_upper_clipped = pmin(hr_upper, x_max)
+  ) %>%
+  mutate(to = trimws(sub(".*-", "", transition)),
+         from = trimws(sub("-.*", "", transition))) %>%
+  left_join(trend_types) %>%
+  mutate(lower_clip = lower_exceeds,
+         upper_clip = upper_exceeds,
+         point_out_of_range = hazard_ratio < x_min | hazard_ratio > x_max,
+         hazard_ratio_plot = ifelse(point_out_of_range, NA, hazard_ratio)) %>%
+  group_by(transition) %>%
+  mutate(
+    n_groups = n(),
+    group_id = row_number() - 1,
+    y_dodge = as.numeric(factor(transition)) + (group_id - (n_groups - 1) / 2) * 0.6 / n_groups
+  ) %>%
+  ungroup()
+
+age_hr <- ggplot(subset(age_hazards_plot, constraint_type == "transition_specific"), 
+       aes(color = covariate_term)) +
+  geom_errorbar(aes(xmin = hr_lower_clipped, xmax = hr_upper_clipped, y = transition), 
+                position = pd, width = 0.2) +
+  geom_point(aes(x = hazard_ratio_plot, y = transition), 
+             position = pd, size = 2) +
+  # Left arrows (for lower CI exceeding limits)
+  geom_segment(
+    aes(y = transition,
+        x = hr_lower_clipped*1.5, xend = hr_lower_clipped,
+        alpha = lower_clip),
+    arrow = arrow(length = unit(0.15, "cm"), type = "closed"),
+    position = pd,
+    show.legend = FALSE
+  ) +
+  # Right arrows (for upper CI exceeding limits)
+  geom_segment(
+    aes(y = transition, 
+        x = hr_upper_clipped/1.5, xend = hr_upper_clipped,
+        alpha = upper_clip),
+    arrow = arrow(length = unit(0.15, "cm"), type = "closed"),
+    position = pd,
+    show.legend = FALSE
+  ) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_log10(limits = c(x_min, x_max)) +
+  scale_color_manual(breaks = age_quintile_colors$model_term,
+                     values = age_quintile_colors$color,
+                     labels = age_quintile_colors$model_label
+                     ) +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0), guide = "none") +
+  labs(x = "Hazard Ratio (log scale)", y = "Transition", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+age_hr
+
+```
+
+```{r}
+#| label: age-hrs-spline
+
+age_hazards_spline <- extract_spline_hazard_ratios(
+  list(base_model_age_spline = univar_models$base_model_age_spline),
+  spline_var = "age",
+  reference_value = NULL,
+  grid_length = 100,
+  ci_level = 0.95,
+  verbose = FALSE
+  ) %>%
+  mutate(to_state = factor(to_state, levels = c("M", "S", "D", "R"), ordered = TRUE))
+
+age_hazards_linear <- extract_linear_hazard_ratios(
+  fitted_msm_models = list(base_model_age_linear = univar_models$base_model_age_linear),
+  linear_var = "age",
+  reference_value = NULL
+)
+
+age_hazards_long <- age_hazards_spline %>%
+  dplyr::select(transition, from_state, to_state, 
+                covariate_value, hr, hr_lower, hr_upper) %>%
+  mutate(model_type = "Spline") %>%
+  bind_rows(
+    age_hazards_linear %>%
+      dplyr::select(transition, from_state, to_state, 
+                    covariate_value, hr, hr_lower, hr_upper) %>%
+      mutate(model_type = "Linear")
+  ) %>%
+  mutate(transition = factor(transition,
+                             levels = c("M -> S", "S -> M", "M -> D",
+                                        "S -> D", "M -> R", "S -> R"),
+                             ordered = TRUE))
+
+age_hr_sp <- ggplot(age_hazards_long, aes(x = covariate_value, y = hr, fill = model_type)) +
+  geom_line(aes(color = model_type), show.legend = FALSE) +
+  geom_ribbon(aes(ymin = hr_lower, ymax = hr_upper), alpha = 0.2, color = NA) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  # geom_hline(aes(yintercept = )) +
+  geom_vline(xintercept = mean_age, linetype = "dotted") +
+  facet_wrap(~ transition, nrow = 3) +
+  scale_y_log10(limits = c(0.01, 100)) +
+  scale_color_manual(values = c("Linear" = "#440154FF", "Spline" = "#35B779FF"),
+                     name = "Model type") +
+  scale_fill_manual(values = c("Linear" = "#440154FF", "Spline" = "#35B779FF"),
+                     name = "Model type") +
+  labs(x = "Age (years)", y = "Hazard Ratio (log scale)") +
+  theme_minimal() +
+  guides(color = "none", fill = "none") +
+  theme(plot.margin = margin(t = 0, r = 1, b = 0, l = 1, unit = "pt"))
+
+
+```
+
+```{r}
+#| label: age-plots
+
+design1 <- "
+14
+24
+34
+"
+
+age_combined1 <- age_hist + age_boxplot + age_hr + age_logl + 
+  plot_layout(heights = c(2, 1, 6), design = design1, guides = "collect") &
+  theme(legend.position = "bottom") &
+  guides(color = guide_legend(nrow = 2))
+
+age_combined1
+
+ggsave(here("figs", "age_combined1.png"), age_combined, width = 8, height = 8)
+
+design2 <- "
+14
+34
+32
+"
+
+age_combined2 <- age_hist + age_hr + age_logl_nc + age_hr_sp +
+  plot_layout(heights = c(2, 1, 4), design = design2, guides = "collect") &
+  theme(legend.position = "bottom") &
+  guides(color = guide_legend(nrow = 2))
+
+age_combined2
+
+ggsave(here("figs", "age_combined2.png"), age_combined2, width = 8, height = 8)
+
+```
+
+```{r}
+#| label: tx-history-timeline
+
+cov_tx_plot_dat <- pt_stg %>%
+  dplyr::filter(model == "base_model") %>%
+  arrange(LOS, deid_enc_id, DaysSinceEntry) %>%
+  mutate(deid_enc_id = factor(deid_enc_id, levels = unique(deid_enc_id))) %>%
+  mutate(COVID_tx = case_when(
+    COVID_tx %in% c("No Treatment", "Monoclonal Antibody") ~ "No Treatment",
+    TRUE ~ as.character(COVID_tx)
+  ) %>% factor()) %>%
+  mutate(COVID_tx = relevel(COVID_tx, ref = "No Treatment"))
+
+cov_tx_plot_dat %>% 
+  dplyr::select(deid_enc_id, date, COVID_tx) %>%
+  group_by(COVID_tx) %>%
+  dplyr::summarize(n = n()) %>%
+  kable(col.names = c("Treatment", "# pt-days"),
+        caption = "Number of patient-days on treatment") %>%
+  kable_styling()
+
+cov_tx_plot_dat %>% 
+  dplyr::select(deid_enc_id, COVID_tx) %>%
+  mutate(COVID_tx = as.character(COVID_tx)) %>%
+  dplyr::filter(COVID_tx != "No Treatment") %>%
+  distinct() %>%
+  group_by(COVID_tx) %>%
+  dplyr::summarize(n = n()) %>%
+  kable(col.names = c("Treatment", "# unique pts"),
+        caption = "Number of unique patient encounters with at least 1 day of treatment") %>%
+  kable_styling()
+
+pal <- viridis::viridis(3, option = "D")
+
+# Create your summary table as a data frame
+table_data <- cov_tx_plot_dat %>% 
+  dplyr::select(deid_enc_id, date, COVID_tx) %>%
+  group_by(COVID_tx) %>%
+  dplyr::summarize(n = n()) %>%
+  rename(Treatment = COVID_tx, `# pt-days` = n)
+
+# Convert to a tableGrob (grid graphics object)
+table_grob <- tableGrob(table_data, rows = NULL,
+                        theme = ttheme_minimal(base_size = 10))
+
+# Add caption
+title <- textGrob("Number of patient-days on treatment", 
+                  gp = gpar(fontsize = 11, fontface = "bold"))
+table_grob <- gtable::gtable_add_rows(table_grob, 
+                                      heights = grobHeight(title) + unit(5, "mm"),
+                                      pos = 0)
+table_grob <- gtable::gtable_add_grob(table_grob, title, 
+                                      t = 1, l = 1, r = ncol(table_grob))
+
+# Your ggplot
+pal <- viridis::viridis(3, option = "D")
+p <- ggplot(cov_tx_plot_dat, aes(x = DaysSinceEntry, y = deid_enc_id, 
+                                  fill = COVID_tx)) +
+  geom_tile() +
+  labs(x = "Days Since Entry") +
+  theme_minimal() +
+  scale_fill_manual(breaks = c("No Treatment", "Corticosteroids", 
+                               "Remdesivir only", "Remdesivir + Corticosteroid"),
+                    values = c("grey70", pal)) +
+  xlim(0, 21) +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "none") +
+  guides(fill = guide_legend(override.aes = list(shape = 15, size = 4, alpha = 1)))
+
+# Combine with patchwork
+cov_tx_dist <- p + inset_element(table_grob, 
+                  left = 0.55, bottom = 0.05, 
+                  right = 0.97, top = 0.5)
+
+```
+
+
+```{r}
+#| label: tx-history-hrs
+
+source(here("R", "00c-fns-model_fitting.R"))
+univar_models <- readRDS(here("data", "univar_models.rds"))
+
+cov_tx_specs <- build_univariate_model_specs(
+  covariate_specs = build_univariate_specs(covariates = c("COVID_tx"), NULL),
+  model_structures = c("base_model")
+)
+
+# Now try fitting again
+cov_tx_mod <- fit_msm_models(
+  patient_data = cov_tx_plot_dat,
+  crude_rates = crude_rates,
+  model_specs = cov_tx_specs,
+  covariates = c("COVID_tx"),
+  require_se = TRUE,
+  mc.cores = 1
+)
+
+cov_tx_hr <- tidy_msm_hazards(cov_tx_mod)
+
+# Define plot limits
+x_min <- 0
+x_max <- 6
+
+# Flag which error bars exceed limits and clip them
+cov_tx_hr_plot <- cov_tx_hr %>%
+  mutate(
+    lower_exceeds = hr_lower < x_min,
+    upper_exceeds = hr_upper > x_max,
+    hr_lower_clipped = pmax(hr_lower, x_min),
+    hr_upper_clipped = pmin(hr_upper, x_max)
+  ) %>%
+  mutate(to = trimws(sub(".*-", "", transition)),
+         from = trimws(sub("-.*", "", transition))) %>%
+  left_join(trend_types) %>%
+  mutate(lower_clip = ifelse(lower_exceeds, TRUE, FALSE),
+         upper_clip = ifelse(upper_exceeds, TRUE, FALSE))
+
+# Create position dodge object to share across layers
+pd <- position_dodge(width = 0.5)
+
+cov_tx_hr <- ggplot(cov_tx_hr_plot, aes(y = transition, x = hazard_ratio, color = covariate_term, group = covariate_term)) +
+  geom_point(alpha = 0) +
+  geom_pointrange(
+    aes(xmin = hr_lower_clipped, xmax = hr_upper_clipped),
+    position = pd,
+    show.legend = FALSE
+  ) +
+  geom_segment(
+    data = cov_tx_hr_plot,
+    aes(x = hr_upper_clipped - 0.1,
+        xend = hr_upper_clipped,
+        alpha = upper_clip),
+    arrow = arrow(length = unit(0.15, "cm"), type = "closed"),
+    position = pd,
+    show.legend = FALSE
+  ) +
+  geom_segment(
+    data = cov_tx_hr_plot,
+    aes(y = transition,
+        yend = transition,
+        x = hr_lower_clipped + 0.1,
+        xend = hr_lower_clipped,
+        alpha = lower_clip),
+    arrow = arrow(length = unit(0.15, "cm"), type = "closed"),
+    position = pd,
+    show.legend = FALSE
+  ) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  labs(y = "Transition", x = "Hazard Ratio (95% CI)") +
+  theme_minimal() +
+  theme(legend.title = element_blank(),
+        legend.position = "bottom") +
+  scale_color_manual(labels = c("No Treatment", "Corticosteroids", 
+                               "Remdesivir only", "Remdesivir + Corticosteroid"),
+                     breaks = c("COVID_txNo Treatment", "COVID_txCorticosteroids", 
+                                "COVID_txRemdesivir only", "COVID_txRemdesivir + Corticosteroid"),
+                    values = c("grey70", pal)) +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0), guide = "none") +
+  xlim(c(x_min, x_max)) +
+  guides(color = guide_legend(override.aes = list(shape = 15, size = 4, alpha = 1)))
+
+cov_tx_combined <- cov_tx_dist / cov_tx_hr + plot_layout(heights = c(2, 1))
+
+ggsave(here("figs", "cov_tx_combined.png"), cov_tx_combined, width = 8, height = 8)
+
+ggplot(cov_tx_hr_plot, aes(x = transition, y = hazard_ratio, color = covariate_term, group = covariate_term)) +
+  geom_point(alpha = 0) +
+  geom_pointrange(
+    aes(ymin = hr_lower_clipped, ymax = hr_upper_clipped),
+    position = pd,
+    show.legend = FALSE
+  ) +
+  geom_segment(
+    data = cov_tx_hr_plot,
+    aes(y = hr_upper_clipped - 0.1,
+        yend = hr_upper_clipped,
+        alpha = upper_clip),
+    arrow = arrow(length = unit(0.15, "cm"), type = "closed"),
+    position = pd,
+    show.legend = FALSE
+  ) +
+  geom_segment(
+    data = cov_tx_hr_plot,
+    aes(x = transition,
+        xend = transition,
+        y = hr_lower_clipped + 0.1,
+        yend = hr_lower_clipped,
+        alpha = lower_clip),
+    arrow = arrow(length = unit(0.15, "cm"), type = "closed"),
+    position = pd,
+    show.legend = FALSE
+  ) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  labs(x = "Transition", y = "Hazard Ratio (95% CI)") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 30)) +
+  scale_color_manual(labels = c("No Treatment", "Corticosteroids", 
+                               "Remdesivir only", "Remdesivir + Corticosteroid"),
+                     breaks = c("COVID_txNo Treatment", "COVID_txCorticosteroids", 
+                                "COVID_txRemdesivir only", "COVID_txRemdesivir + Corticosteroid"),
+                    values = c("grey70", pal),
+                    name = "COVID Treatment") +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0), guide = "none") +
+  ylim(c(x_min, x_max)) +
+  guides(color = guide_legend(override.aes = list(shape = 15, size = 4, alpha = 1), nrow = 2))
+
+ggsave(here("figs", "cov_tx_hrs-slides.png"), width = 4, height = 4.5)
+
+```
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```
