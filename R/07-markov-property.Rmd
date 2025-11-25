@@ -1,0 +1,80 @@
+---
+title: "Multi-State Model Analysis: Markov Property"
+date: today
+format:
+  html:
+    df-print: paged
+    toc: true
+    toc-float: true
+    toc-depth: 3
+    code-fold: true
+    theme: default
+    embed-resources: true
+editor: source
+editor_options: 
+  markdown: 
+    wrap: 72
+execute:
+  cache: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+rm(list = ls())
+
+library(here)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(tableone)
+library(Hmisc)
+library(ggpubr)
+library(viridis)
+```
+
+```{r}
+#| label: load-data
+#| include: false
+
+source(here("R", "00-config.R"))
+source(here("R", "00f-fns-tbl_figs.R"))
+
+pt_stg <- readRDS(here("data", "pt_stg.rds"))
+
+base_models <- readRDS(here("data", "base_models.rds"))
+base_comp <- readRDS(here("data", "base_comp.rds"))
+
+markov_models <- readRDS(here("data", "markov_models.rds"))
+markov_comp <- readRDS(here("data", "markov_comp.rds"))
+
+base_structure_comp <- readRDS(here("data", "base_structure_comp.rds"))
+# base_cv <- readRDS(here("data", "cv_results", "base", "cv_summary_all_models.rds"))
+# base_cv_metadata <- readRDS(here("data", "cv_results", "base", "cv_metadata.rds"))
+```
+
+```{r}
+#| label: markov-comp
+
+intersection <- intersect(
+  names(markov_comp$model_summary),
+  names(base_comp$model_summary)
+)
+
+base_comp_temp <- base_comp$model_summary %>%
+      mutate(base_variables = unlist(base_variables)) %>%
+      dplyr::select(intersection)
+
+markov_comp_temp <- markov_comp$model_summary %>%
+  mutate(base_variables = unlist(base_variables)) %>%
+  dplyr::select(intersection)
+
+all_comp <- base_comp_temp %>%
+  rbind(markov_comp_temp)
+
+
+```
+
+
+

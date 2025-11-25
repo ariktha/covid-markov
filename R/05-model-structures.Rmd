@@ -40,7 +40,7 @@ library(viridis)
 #| include: false
 
 source(here("R", "00-config.R"))
-source(here("R", "00x-fns-tbl_figs.R"))
+source(here("R", "00f-fns-tbl_figs.R"))
 
 pt_stg <- readRDS(here("data", "pt_stg.rds"))
 
@@ -51,465 +51,19 @@ base_cv <- readRDS(here("data", "cv_results", "base", "cv_summary_all_models.rds
 base_cv_metadata <- readRDS(here("data", "cv_results", "base", "cv_metadata.rds"))
 ```
 
-# Model structure descriptives
-
-## State space diagrams
-
-![State space diagram](images/state-space.png)
-
-## Statetables
-
-### By stage
-
-Frequency of each pair of stages being observed in successive days
-
 ```{r}
-#| label: stage-table
-#| echo: true
-#| fig-width: 5
-#| fig-height: 4
+#| label: model-and-parameter-definitions
 
-stage_table <- statetable.msm(stage, deid_enc_id, data = subset(pt_stg, model == "base_model"))
-
-stage_df <- as.data.frame(stage_table) %>%
-  mutate(across(c(from, to), as.character)) %>%
-  mutate(
-    from = factor(from, levels = rev(stage_order)),
-    to = factor(to, levels = stage_order),
-    Freq = ifelse(Freq == 0, NA, Freq)
-  )
-
-ggplot(data = stage_df, aes(x = to, y = from, fill = Freq)) +
-  geom_tile(color = "white", size = 0.1) +
-  geom_text(aes(label = scales::comma(Freq)), color = "white", size = 2.5, fontface = "bold") +
-  scale_fill_viridis_c(
-    name = "Count", 
-    trans = "log10", 
-    na.value = "white", 
-    limits = c(1, NA),
-    breaks = c(1, 10, 100, 1000),
-    labels = c("1", "10", "100", "1000"),
-    direction = -1,
-    option = "mako"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(legend.position = "bottom") +
-  labs(x = "To Stage", y = "From Stage")
-  
-```
-
-### By state
-
-Frequency of each pair of states being observed in successive days
-
-```{r}
-#| label: state-table
-#| echo: true
-#| fig-width: 9
-
-get_state_table <- function(model_name) {
-  model_data <- subset(pt_stg, model == model_name)
-  st <- statetable.msm(state, deid_enc_id, data = model_data)
-  st_df <- as.data.frame(st) %>%
-    mutate(across(c(from, to), as.character)) %>%
-    filter(from %in% state_order, to %in% state_order) %>%
-    mutate(
-      from = factor(from, levels = rev(state_order)),
-      to = factor(to, levels = state_order),
-      Freq = ifelse(Freq == 0, NA, Freq)
-    )
-  return(st_df)
-}
-
-plot_data <- map(names(models), get_state_table)
-names(plot_data) <- models
-
-create_tile_plot <- function(data, model_name) {
-  ggplot(data, aes(x = to, y = from, fill = Freq)) +
-    geom_tile(color = "white", size = 0.1) +
-    geom_text(aes(label = scales::comma(Freq)), color = "white", size = 2.5, fontface = "bold") +
-    scale_fill_viridis_c(
-      name = "Count", 
-      trans = "log10", 
-      na.value = "white", 
-      limits = c(1, 10000),
-      breaks = c(1, 10, 100, 1000, 10000),
-      labels = c("1", "10", "100", "1000", "10000"),
-      direction = -1,
-      option = "mako"
-    ) +
-    theme_minimal(base_size = 14) +
-    labs(x = "To State", y = "From State", title = model_name)
-}
-
-plot_list <- map2(plot_data, names(plot_data), create_tile_plot)
-
-combined_plot <- ggarrange(
-  plotlist = plot_list,
-  nrow = 2, 
-  ncol = 3,
-  common.legend = TRUE,
-  legend = "bottom"
+st_grn_mod_colors <- c(
+  "2 moderate states" = "#0173B2",
+  "3 moderate states" = "#029E73",
+  "2 severe states" = "#ECA400"
 )
 
-combined_plot
-
-```
-
-# Model Structure: Overall results
-
-## Transition intensity estimates
-
-```{r}
-#| label: transition-intensities-prep
-#| echo: true
-
-qmat_data <- base_comp[["qmatrix"]]
-qmat_data <- qmat_data %>%
-  dplyr::select(model_name, statename, tostatename, 
-                estimate, conf.low, conf.high) %>%
-  rename(
-    model = model_name,
-    from = statename,
-    to = tostatename,
-    q_estimate = estimate,
-    q_conf_low = conf.low,
-    q_conf_high = conf.high
-  ) %>%
-  left_join(models_df, by = "model") %>%
-  left_join(trend_types, by = c("from", "to"))
-
-x_limit <- 0.4
-
-qmat_data <- qmat_data %>%
-  mutate(
-    q_conf_high_capped = pmin(q_conf_high, x_limit),
-    needs_arrow = q_conf_high > x_limit,
-    from = factor(from, levels = state_order),
-    to = factor(to, levels = state_order),
-    transition = paste0(from, " → ", to),
-    transition = factor(transition, levels = paste0(rep(state_order, each = length(state_order)), 
-                                                   " → ", 
-                                                   rep(state_order, times = length(state_order))))
-  ) %>%
-  filter(transition %in% unique(transition)) %>%
-  mutate(model_name = factor(model_name, levels = models_df$model_name)) %>%
-  mutate(text = format_ci(q_estimate, q_conf_low, q_conf_high, digits = 2))
-
 ```
 
 ```{r}
-#| label: transition-intensities-table
-#| echo: true
-
-kable(qmat_data %>%
-        dplyr::filter(model == "base_model") %>%
-        dplyr::select(model_name, transition, trend, 
-                      text) %>%
-        arrange(model_name, transition),
-      col.names = c("Model Structure", "Transition", "Trend", 
-                    "Transition intensity (per day)"),
-      digits = c(0, 0, 0, 3, 3, 3)) %>%
-  kable_styling(full_width = FALSE) %>%
-  row_spec(0, bold = TRUE)
-
-```
-
-```{r}
-#| label: transition-intensities-plot
-#| echo: true
-#| fig.width: 7
-#| fig.height: 6
-
-ggplot(qmat_data, aes(x = q_estimate, y = fct_rev(transition), color = trend)) +
-  geom_point(size = 2.5) +
-  # Error bars with capped upper limits
-  geom_errorbarh(aes(xmin = q_conf_low, xmax = q_conf_high_capped), height = 0.2) +
-  # Add arrows for truncated confidence intervals
-  geom_segment(data = filter(qmat_data, needs_arrow),
-               aes(x = x_limit - 0.01, xend = x_limit - 0.005, 
-                   y = fct_rev(transition), yend = fct_rev(transition)),
-               arrow = arrow(length = unit(0.1, "cm"), type = "closed"),
-               linewidth = 0.8) +
-  facet_wrap(~ model_name, scales = "free_y") +
-  scale_x_continuous(limits = c(0, x_limit)) +
-  scale_color_manual(values = trend_colors) +
-  labs(x = "Fitted transition intensity (per day)", y = "Transition") +
-  theme_minimal() +
-  theme(strip.text = element_text(face = "bold"),
-        legend.position = "bottom")
-
-```
-
-## Transition probabilities
-
-```{r}
-#| label: transition-probabilities-prep
-#| echo: true
-
-pmat_data <- base_comp[["pmats"]]
-
-pmat_data <- pmat_data %>%
-  dplyr::select(model_name, statename, tostatename, t_value, 
-                estimate, conf.low, conf.high) %>%
-  rename(
-    model = model_name,
-    from = statename,
-    to = tostatename,
-    time_days = t_value,
-    p_estimate = estimate,
-    p_conf_low = conf.low,
-    p_conf_high = conf.high
-  ) %>%
-  left_join(models_df, by = "model")
-
-pmat_data <- add_transition_trends(pmat_data)
-
-time_points <- unique(pmat_data$time_days)
-
-pmat_data <- pmat_data %>%
-  mutate(
-    from = factor(from, levels = state_order),
-    to = factor(to, levels = state_order),
-    transition = paste0(from, " → ", to),
-    transition = factor(transition, levels = paste0(rep(state_order, each = length(state_order)), 
-                                                   " → ", 
-                                                   rep(state_order, times = length(state_order))))
-  ) %>%
-  filter(transition %in% unique(transition)) %>%
-  mutate(model_name = factor(model_name, levels = models_df$model_name)) %>%
-  mutate(text = format_ci(p_estimate, p_conf_low, p_conf_high, digits = 2)) %>%
-  drop_na()
-
-```
-
-```{r}
-#| label: transition-probabilities-table
-#| echo: true
-
-kable(pmat_data %>%
-        dplyr::filter(model == "base_model") %>%
-        dplyr::select(model_name, time_days, transition, trend, text) %>%
-        arrange(model_name, transition),
-      col.names = c("Model Structure", "Time (days)", "Transition", "Trend", 
-                    "Transition probability"),
-      digits = c(0, 0, 0, 0, 2, 2, 2)) %>%
-  kable_styling(full_width = FALSE) %>%
-  row_spec(0, bold = TRUE)
-
-```
-
-```{r}
-#| label: transition-probabilities-plot-1
-#| echo: true
-
-plot_pmat_by_model <- function(model_name, nrows, ncols, data = pmat_data, model_title = NULL) {
-  model_data <- pmat_data[pmat_data$model == model_name, ]
-  p <- ggplot(model_data, aes(x = time_days, y = p_estimate, color = trend)) +
-    geom_line(linewidth = 1) +
-    geom_ribbon(aes(ymin = p_conf_low, ymax = p_conf_high), alpha = 0.2) +
-    # facet_wrap(~ transition, nrow = nrows, ncol = ncols) +
-    facet_grid(from~to, 
-               labeller = labeller(
-                 from = function(x) paste0("from = ", x),
-                 to = function(x) paste0("to = ", x)
-                 )) +
-    scale_color_manual(values = trend_colors) +
-    labs(x = "Time (days)", y = "Transition probability", title = model_title) +
-    ylim(c(0, 1)) +
-    theme_minimal() +
-    theme(strip.text = element_text(face = "bold"),
-          legend.position = "bottom")
-  return(p)
-}
-
-pmat_plots <- models_df %>%
-  mutate(nrows = c(2, 2, 3, 3, 4, 3),
-         ncols = c(4, 4, 5, 5, 6, 5)) %>%
-  pmap(function(model, nrows, ncols, model_name, ...) {
-    plot_pmat_by_model(model, nrows, ncols, data = pmat_data, model_title = model_name)
-  })
-
-pmat_plots
-
-```
-
-```{r}
-#| label: transition-probabilities-plot-2
-#| echo: true
-
-ggplot(data = pmat_data, aes(y = transition, color = trend, alpha = time_days, group = time_days)) +
-  geom_point(aes(x = p_estimate), size = 2.5) +
-  geom_errorbarh(aes(xmin = p_conf_low, xmax = p_conf_high), height = 0.2) +
-  facet_wrap(~ model_name, scales = "free_y") +
-  scale_x_continuous(limits = c(0, 1), name = "Probability of transition") +
-  scale_color_manual(values = trend_colors) +
-  theme_minimal() +
-  theme(legend.position = "bottom",
-        axis.title.y = element_blank())
-
-```
-
-```{r}
-#| label: transition-probabilities-plot-3
-#| echo: true
-
-# Separate by from type and to type?
-
-```
-
-## Sojourn times
-
-```{r}
-#| label: sojourn-times-prep
-#| echo: true
-
-## Temp sojourn
-source(here("R", "00b-fns-model_eval.R"))
-temp <- tidy_msm_sojourns(base_models, ci_method = "normal")
-base_comp[["sojourns"]] <- temp
-
-sojourn_data <- base_comp[["sojourns"]]
-sojourn_data <- sojourn_data %>%
-  dplyr::select(model_name, state, estimates, L, U) %>%
-  rename(
-    model = model_name,
-    sojourn_estimate = estimates,
-    sojourn_conf_low = L,
-    sojourn_conf_high = U
-  ) %>%
-  left_join(models_df, by = "model") %>%
-  mutate(
-    state = factor(state, levels = state_order),
-    model_name = factor(model_name, levels = models_df$model_name),
-    text = format_ci(sojourn_estimate, sojourn_conf_low, sojourn_conf_high, digits = 2),
-    state_type = ifelse(grepl("M", state) == TRUE, "Moderate", "Severe")
-  )
-
-```
-
-```{r}
-#| label: sojourn-times-table
-#| echo: true
-
-kable(sojourn_data %>%
-        dplyr::select(model_name, state, text),
-  col.names = c("Model", "State", "Mean sojourn time (days)")) %>%
-  kable_styling(full_width = FALSE)
-  
-```
-
-```{r}
-#| label: sojourn-times-plot-1
-#| echo: true
-
-ggplot(sojourn_data, 
-       aes(x = sojourn_estimate, y = fct_rev(state), color = state_type),
-       alpha = 0.6) +
-  geom_point(size = 2.5) +
-  geom_errorbarh(aes(xmin = sojourn_conf_low, xmax = sojourn_conf_high), height = 0.2) +
-  facet_wrap(~ model_name, scales = "free_y") +
-  labs(x = "Mean sojourn time (days)", y = "State") +
-  theme_minimal() +
-  scale_color_manual(breaks = c("Moderate", "Severe"), 
-                     values = c("#660066", "#336666"),
-                     name = "State type") +
-  theme(strip.text = element_text(face = "bold"),
-        legend.position = "bottom") +
-  xlim(c(0, NA))
-
-```
-
-```{r}
-#| label: sojourn-times-plot-2
-#| echo: true
-
-ggplot(sojourn_data, 
-       aes(x = sojourn_estimate, y = fct_rev(state), color = model_name),
-       alpha = 0.6) +
-  geom_point(size = 2.5, position = position_dodge(width = 1)) +
-  geom_errorbarh(aes(xmin = sojourn_conf_low, xmax = sojourn_conf_high), 
-                 height = 0.2, position = position_dodge(width = 1)) +
-  facet_wrap(~ state_type, scales = "free_y", nrow = 2) +
-  labs(x = "Mean sojourn time (days)", y = "State") +
-  theme_minimal() +
-  theme(strip.text = element_text(face = "bold"),
-        legend.position = "bottom") +
-  xlim(c(0, NA)) +
-  scale_color_viridis_d(name = "Model structure")
-
-```
-
-## Model comparison
-
-### Log likelihoods
-
-```{r}
-#| label: model-comparison-loglik
-#| echo: true
-  
-model_comp_ll <- base_comp$model_summary %>%
-  # dplyr::filter(model_name %in% mod_state_mods) %>%
-  rename(model = model_name) %>%
-  left_join(models_df, by = "model") %>%
-  dplyr::select(model_name, n_params, loglik, AIC, BIC)
-
-model_comp_ll %>%
-  kable(col.names = c("Model", "Number of parameters", "Log-likelihood", "AIC", "BIC")) %>%
-  kable_styling(full_width = FALSE)
-
-model_comp_ll_long <- model_comp_ll %>%
-  pivot_longer(cols = c(n_params, loglik, AIC, BIC), 
-               names_to = "metric", values_to = "value") %>%
-  mutate(metric = recode(metric, 
-                         n_params = "Number of parameters", 
-                         loglik = "Log-likelihood", 
-                         AIC = "AIC", 
-                         BIC = "BIC")) %>%
-  group_by(metric) %>%
-  mutate(rank = rank(-value, ties.method = "min"))
-
-ggplot(subset(model_comp_ll_long, model_name != "Base model"), 
-       aes(x = model_name)) +
-  geom_point(aes(y = value)) +
-  geom_label(aes(y = value, label = rank), size = 3) +
-  geom_hline(data = subset(model_comp_ll_long, model_name == "Base model"), aes(yintercept = value), linetype = "dashed") +
-  facet_wrap(~ metric, scales = "free_y", nrow = 4) +
-  labs(x = "Model", y = "Value") +
-  theme_minimal() +
-  theme(legend.position = "none", axis.title = element_blank())
-
-```
-
-```{r}
-#| label: model-comparisons-draic-drlcv
-#| eval: false
-
-models_comparison <- base_structure_comp %>%
-  drop_na() %>%
-  mutate(draic_text = format_ci(draic, draic_ll, draic_ul, digits = 1),
-         drlcv_text = format_ci(drlcv, drlcv_ll, drlcv_ul, digits = 1)) %>%
-  mutate(model1 = recode(model1_structure, !!!models),
-         model2 = recode(model2_structure, !!!models)) %>%
-  mutate(preferred_model_draic = ifelse(draic < 0, model1, model2),
-         preferred_model_drlcv = ifelse(drlcv < 0, model1, model2))
-  
-
-kable(models_comparison %>% 
-        dplyr::select(model1, model2, draic_text, drlcv_text, 
-                      preferred_model_draic, preferred_model_drlcv),
-      col.names = c("Model 1", "Model 2", 
-                    "ΔrAIC (95% CI)", "ΔrLCV (95% CI)",
-                    "Preferred model (ΔrAIC)", "Preferred model (ΔrLCV)"),
-      digits = c(0, 0, 1, 1, 0, 0)) %>%
-  kable_styling(full_width = FALSE) %>%
-  row_spec(0, bold = TRUE)
-
-```
-
-
-```{r}
-#| label: model-comparisons-pred-perf
+#| label: load-data
 
 rds_files <- list.files(
     path = here("data", "cv_results", "base"),
@@ -527,6 +81,11 @@ names(rds_data) <- file_names
 
 elements_to_remove <- c("cv_metadata", "cv_summary_all_models")
 rds_data <- rds_data[!names(rds_data) %in% elements_to_remove]
+
+```
+
+```{r}
+#| label: prep-data
 
 tibble_name <- "fold_metrics"  # replace with your tibble name
 column_name <- "model"      # replace with desired column name
@@ -564,207 +123,507 @@ pred_err_summ <- pred_err_dat %>%
     .groups = 'drop'
   )
 
+```
+
+```{r}
+#| label: prep-plot-pred-perf
+
 # Brier = Mean squared error of probability predictions
 
-ggplot(subset(pred_err_summ, model_name != "Base model")) +
-  geom_point(aes(y = mean, x = model_name), size = 2.5) +
-  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd, x = model_name), width = 0.2) +
-  geom_hline(data = subset(pred_err_summ, model_name == "Base model"), aes(yintercept = mean), linetype = "dashed") +
-  facet_wrap(~ metric, scales = "free_y", ncol = 2) +
-  theme_minimal() +
+# Define the order and labels
+metric_order <- c("brier_death", "brier_severe", 
+                  "death_auc", "severe_auc", 
+                  "calibration_slope_death", "calibration_slope_severe", 
+                  "total_los_mae", "days_severe_mae")
+
+metric_labels <- c("brier_death" = "Brier Score: Death",
+                   "brier_severe" = "Brier Score: Severe",
+                   "death_auc" = "AUROC: Death",
+                   "severe_auc" = "AUROC: Severe",
+                   "calibration_slope_death" = "Calibration Slope: Death",
+                   "calibration_slope_severe" = "Calibration Slope: Severe",
+                   "total_los_mae" = "MAE: Total LOS",
+                   "days_severe_mae" = "MAE: Days Severe")
+
+pred_err_summ$metric <- factor(pred_err_summ$metric, levels = metric_order)
+
+facet_limits <- data.frame(
+  metric = factor(metric_order,
+                  levels = metric_order),
+  ymin = c(0.07, 0.18, 0.5, 0.5, NA, NA, 5, 5),
+  ymax = c(0.09, 0.28, 1, 1, NA, NA, 10, 10)
+)
+
+model_structure_tib <- tibble(
+  model = c("base_model", "mod_2", "mod_3", "sev_2", "history_sev", "reduced_trans"),
+  model_name = c("Base model", "2 moderate states", "3 moderate states", 
+                     "2 severe states", "History of severe", "Simplified transitions"),
+  model_label = c("Base model", "2 moderate\nstates", "3 moderate\nstates", 
+                      "2 severe\nstates", "State for history\nof severe", "Simplified\ntransitions"),
+  model_cat = c("Base", "State granularity", "State granularity", 
+                     "State granularity", "Transition structure", "Transition structure"))
+
+pred_err_summ <- pred_err_summ %>%
+  left_join(model_structure_tib, by = "model_name")
+```
+
+```{r}
+#| label: plot-pred-perf
+
+ggplot(subset(pred_err_summ, model_name != "Base model"))  +
+  geom_blank(data = facet_limits, aes(x = 1, y = ymin)) +
+  geom_blank(data = facet_limits, aes(x = 1, y = ymax)) +
+  geom_rect(data = subset(pred_err_summ, model_name == "Base model"),
+            aes(ymin = mean - sd, ymax = mean + sd),
+            xmin = -Inf, xmax = Inf,
+            alpha = 0.6, fill = "grey80") +
+  geom_point(aes(y = mean, x = model_name, color = model_cat), size = 2.5) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd, x = model_name, color = model_cat), width = 0.2) +
+  geom_hline(data = subset(pred_err_summ, model_name == "Base model"), 
+             aes(yintercept = mean), linetype = "dashed") +
+  facet_wrap(~ metric, scales = "free_y", ncol = 2,
+             labeller = labeller(metric = metric_labels)) +
+  scale_x_discrete(limits = c("2 moderate states", "3 moderate states", "2 severe states", 
+                               "History of severe", "Simplified transitions"),
+                   labels = c("2 moderate\nstates", "3 moderate\nstates", "2 severe\nstates", 
+                               "State for history\nof severe", "Simplified\ntransitions")) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 3)) +
+  scale_color_manual(values = c("#DB9E9E", "#287d7d"),
+                     breaks = c("State granularity", "Transition structure"),
+                     name = "Model type") +
+  theme_minimal(base_size = 12) +
   theme(axis.title = element_blank(),
-        axis.text.x = element_text(angle = 45, hjust = 1))
-```
+        legend.position = "bottom")
 
+ggsave(here("figs", "pred_pref-model-structure-comparisons.png"), width = 10, height = 5)
 
-```{r}
-#| label: model-comparisons-residuals
-
-# # Calculate residuals
-# raw_residual = 1 - expected_prob,
-# pearson_residual = raw_residual / sqrt(expected_prob * (1 - expected_prob)),
-# deviance_residual = sign(raw_residual) * sqrt(pmax(-2 * log(pmax(expected_prob, 1e-10)), 0)),
-
-residuals_data <- base_comp[["residuals"]]
-
-
+saveRDS(pred_err_summ, here("data", "base_structure_pred_summary.rds"))
 
 ```
 
-## State granularity
-
-### Multiple moderate states
-
-
 ```{r}
-#| label: moderate-states-model-comparison-prevalences
+#| label: sojourn-times-prep
 #| echo: true
 
-mod_state_mods <- c("base_model", "mod_2", "mod_3")  
+## Temp sojourn
+source(here("R", "00d-fns-model_eval.R"))
+temp <- tidy_msm_sojourns(base_models, ci_method = "normal")
+base_comp[["sojourns"]] <- temp
 
-mod_prev <- base_comp$prevalence %>%
-  dplyr::filter(model_name %in% mod_state_mods) %>%
-  rename(model = model_name) %>%
+sojourn_data <- base_comp[["sojourns"]]
+sojourn_data <- sojourn_data %>%
+  dplyr::select(model_name, state, estimates, L, U) %>%
+  rename(
+    model = model_name,
+    sojourn_estimate = estimates,
+    sojourn_conf_low = L,
+    sojourn_conf_high = U
+  ) %>%
   left_join(models_df, by = "model") %>%
-  dplyr::select(model_name, time, state, observed_count, 
-                expected_count, expected_count_ll, expected_count_ul,
-                N_at_risk)
-
-ggplot(data = subset(mod_prev, state %in% c("S", "D", "R")),
-       aes(x = factor(time))) +
-  geom_bar(aes(y = N_at_risk), 
-           stat = "identity", alpha = 0.3) +
-  geom_point(aes(y = observed_count, color = model_name), 
-             shape = 5, size = 2, position = position_dodge(width = 1)) +
-  geom_point(aes(y = expected_count, color = model_name), 
-             size = 2, position = position_dodge(width = 1)) +
-  geom_errorbar(aes(ymin = expected_count_ll, 
-                    ymax = expected_count_ul, color = model_name), 
-                width = 0.2, position = position_dodge(width = 1)) +
-  facet_wrap(~state) +
-  labs(x = "Time (days)", y = "Count") +
-  theme_minimal() 
-
-ggplot(data = subset(mod_prev, state %in% c("S", "D", "R")),
-       aes(x = factor(time))) +
-  geom_point(aes(y = observed_count, color = model_name), 
-             shape = 5, size = 2, position = position_dodge(width = 1)) +
-  geom_point(aes(y = expected_count, color = model_name), 
-             size = 2, position = position_dodge(width = 1)) +
-  geom_errorbar(aes(ymin = expected_count_ll, 
-                    ymax = expected_count_ul, color = model_name), 
-                width = 0.2, position = position_dodge(width = 1)) +
-  facet_wrap(~state) +
-  labs(x = "Time (days)", y = "Count") +
-  theme_minimal() 
-
-ggplot(data = subset(mod_prev, state %in% c("M", "M1", "M2", "M3")),
-       aes(x = factor(time))) +
-  geom_bar(aes(y = N_at_risk), 
-           stat = "identity", alpha = 0.3) +
-  geom_point(aes(y = observed_count, color = model_name, alpha = state), 
-             shape = 5, size = 2, position = position_dodge(width = 1)) +
-  geom_point(aes(y = expected_count, color = model_name, alpha = state), 
-             size = 2, position = position_dodge(width = 1)) +
-  geom_errorbar(aes(ymin = expected_count_ll, 
-                    ymax = expected_count_ul, color = model_name, alpha = state), 
-                width = 0.2, position = position_dodge(width = 1)) +
-  # facet_wrap(~state, scales = "free_y") +
-  labs(x = "Time (days)", y = "Count") +
-  theme_minimal() 
-
-ggplot(data = subset(mod_prev, state %in% c("M", "M1", "M2", "M3")),
-       aes(x = factor(time))) +
-  geom_point(aes(y = observed_count, color = model_name, alpha = state), 
-             shape = 5, size = 2, position = position_dodge(width = 1)) +
-  geom_point(aes(y = expected_count, color = model_name, alpha = state), 
-             size = 2, position = position_dodge(width = 1)) +
-  geom_errorbar(aes(ymin = expected_count_ll, 
-                    ymax = expected_count_ul, color = model_name, alpha = state), 
-                width = 0.2, position = position_dodge(width = 1)) +
-  # facet_wrap(~state, scales = "free_y") +
-  labs(x = "Time (days)", y = "Count") +
-  theme_minimal() +
-  scale_alpha_manual(values = c(1, 1, 0.5, 0.3), name = "State", breaks = c("M", "M1", "M2", "M3"))
-
+  mutate(
+    state = factor(state, levels = state_order),
+    model_name = factor(model_name, levels = models_df$model_name),
+    text = format_ci(sojourn_estimate, sojourn_conf_low, sojourn_conf_high, digits = 2),
+    state_type = ifelse(grepl("M", state) == TRUE, "Moderate", "Severe")
+  )
 
 ```
 
-### Multiple severe states
+```{r}
+#| label: sojourn-times-plot
+
+soj_dat <- sojourn_data %>%
+  filter(model %in% c("base_model", "mod_2", "mod_3", "sev_2")) %>%
+  mutate(model_name = factor(model_name, levels = models_df$model_name),
+         state_type = ifelse(grepl("M", state) == TRUE, "Moderate", 
+                             ifelse(grepl("S", state) == TRUE, "Severe", "Other")),
+         state = as.factor(as.character(state)),
+         model_type = ifelse(model %in% c("mod_2", "mod_3"), "Moderate states", 
+                             ifelse(model == "sev_2", "Severe states", "Base model")))
+
+st_grn_soj <- ggplot(subset(soj_dat, model != "base_model"), 
+       aes(x = sojourn_estimate, y = fct_rev(state)))+
+  geom_vline(data = subset(soj_dat, model == "base_model"),
+             aes(xintercept = sojourn_estimate), linetype = "dashed") +
+  geom_rect(data = subset(soj_dat, model == "base_model"),
+            aes(xmin = sojourn_conf_low, xmax = sojourn_conf_high,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.4, fill = "grey80") +
+  geom_point(aes(color = model_name), size = 2.5, 
+             position = position_dodge(width = 1)) +
+  geom_errorbar(aes(xmin = sojourn_conf_low, xmax = sojourn_conf_high, color = model_name), 
+                 height = 0.2, position = position_dodge(width = 1), show.legend = FALSE)  +
+  facet_wrap(~state_type, scales = "free_y", nrow = 2) +
+  labs(x = "Mean sojourn time (days)", y = "State") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom") +
+  xlim(c(0, NA)) +
+  scale_color_manual(name = "Model structure",
+                     values = st_grn_mod_colors) +
+  guides(
+    # color = guide_legend(override.aes = list(size = 4, shape = 15, alpha = 0.6)),
+    color = "none"
+    )
+
+st_grn_soj
+
+```
 
 ```{r}
-#| label: severe-states-model-comparison-prevalences
+#| label: transition-intensities-prep
 #| echo: true
 
-sev_state_mods <- c("base_model", "sev_2")
+qmat_data <- base_comp[["qmatrix"]]
+qmat_data <- qmat_data %>%
+  dplyr::select(model_name, statename, tostatename, 
+                estimate, conf.low, conf.high) %>%
+  rename(
+    model = model_name,
+    from = statename,
+    to = tostatename,
+    q_estimate = estimate,
+    q_conf_low = conf.low,
+    q_conf_high = conf.high
+  ) %>%
+  left_join(models_df, by = "model") %>%
+  left_join(trend_types, by = c("from", "to"))
 
-sev_prev <- base_comp$prevalence %>%
-  dplyr::filter(model_name %in% sev_state_mods) %>%
+qmat_data <- qmat_data %>%
+  mutate(
+    from = factor(from, levels = state_order),
+    to = factor(to, levels = state_order),
+    transition = paste0(from, " → ", to),
+    transition = factor(transition, levels = paste0(rep(state_order, each = length(state_order)), 
+                                                   " → ", 
+                                                   rep(state_order, times = length(state_order))))
+  ) %>%
+  filter(transition %in% unique(transition)) %>%
+  mutate(model_name = factor(model_name, levels = models_df$model_name)) %>%
+  mutate(text = format_ci(q_estimate, q_conf_low, q_conf_high, digits = 2))
+
+x_limit <- 0.2
+
+qmat_dat <- qmat_data %>%
+  filter(model %in% c("base_model", "mod_2", "mod_3", "sev_2")) %>%
+  mutate(model_name = factor(model_name, levels = models_df$model_name),
+         model_type = ifelse(model %in% c("mod_2", "mod_3"), "Moderate states", 
+                             ifelse(model == "sev_2", "Severe states", "Base model")),
+         from_type = case_when(
+           grepl("^M", from) ~ "Moderate",
+           grepl("^S", from) ~ "Severe",
+           TRUE ~ "Other"
+         ),
+         to_type = case_when(
+           grepl("^M", to) ~ "Moderate",
+           grepl("^S", to) ~ "Severe",
+           grepl("^D", to) ~ "Death",
+           grepl("^R", to) ~ "Recovered",
+           TRUE ~ "Other"
+         ),
+         transition = as.character(transition),
+         q_conf_high_capped = pmin(q_conf_high, x_limit),
+         needs_arrow = q_conf_high > x_limit) %>%
+  dplyr::filter(to_type %in% c("Death", "Recovered"))
+
+pd <- position_dodge(width = 0.5)
+
+```
+
+
+```{r}
+#| label: transition-intensities-plot
+
+st_grn_qmat <- ggplot(subset(qmat_dat, model != "base_model"), 
+       aes(x = q_estimate, y = from, group = model_name)) +
+  geom_point(aes(color = model_name), size = 2.5, position = pd) +
+  geom_errorbar(aes(xmin = q_conf_low, xmax = q_conf_high_capped, color = model_name), 
+                height = 0.2, position = pd, show.legend = FALSE) +
+  geom_segment(data = subset(qmat_dat, model != "base_model"),
+               aes(x = x_limit - 0.01, xend = x_limit, 
+                   y = from, yend = from, group = model_name),
+               alpha = 0, position = pd) +
+  # geom_segment(data = filter(qmat_dat, needs_arrow & model != "base_model"),
+  #              aes(x = x_limit - 0.01, xend = x_limit, 
+  #                  y = from, yend = from, color = model_name, group = model_name),
+  #              arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+  #              position = pd) +
+  facet_grid(from_type ~ to_type, scales = "free_y") +
+  geom_vline(data = subset(qmat_dat, model == "base_model"),
+             aes(xintercept = q_estimate), linetype = "dashed") +
+  geom_rect(data = subset(qmat_dat, model == "base_model"),
+            aes(xmin = q_conf_low, xmax = q_conf_high,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.4, fill = "grey80") +
+  scale_color_manual(name = "Model structure",
+                     values = st_grn_mod_colors) +
+  guides(
+    # color = guide_legend(override.aes = list(size = 4, shape = 15, alpha = 0.6)),
+    color = "none"
+    ) +
+  scale_x_continuous(breaks = seq(0, x_limit, by = 0.1),
+                     limits = c(0, x_limit),
+                     name = "Fitted transition intensity (per day)") +
+  labs(y = "From State") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+
+st_grn_qmat
+
+```
+
+```{r}
+#| label: probability-matrices-prep
+
+pmat_data <- base_comp[["pmats"]]
+
+pmat_data <- pmat_data %>%
+  dplyr::select(model_name, statename, tostatename, t_value, 
+                estimate, conf.low, conf.high) %>%
+  rename(
+    model = model_name,
+    from = statename,
+    to = tostatename,
+    time_days = t_value,
+    p_estimate = estimate,
+    p_conf_low = conf.low,
+    p_conf_high = conf.high
+  ) %>%
+  left_join(models_df, by = "model")
+
+pmat_data <- add_transition_trends(pmat_data)
+
+time_points <- unique(pmat_data$time_days)
+
+pmat_data <- pmat_data %>%
+  mutate(
+    from = factor(from, levels = state_order),
+    to = factor(to, levels = state_order),
+    transition = paste0(from, " → ", to),
+    transition = factor(transition, levels = paste0(rep(state_order, each = length(state_order)), 
+                                                   " → ", 
+                                                   rep(state_order, times = length(state_order))))
+  ) %>%
+  filter(transition %in% unique(transition)) %>%
+  mutate(model_name = factor(model_name, levels = models_df$model_name)) %>%
+  mutate(text = format_ci(p_estimate, p_conf_low, p_conf_high, digits = 2)) %>%
+  drop_na()
+
+pmat_dat <- pmat_data %>%
+  filter(model %in% c("base_model", "mod_2", "mod_3", "sev_2")) %>%
+  mutate(model_name = factor(model_name, levels = models_df$model_name),
+         model_type = ifelse(model %in% c("mod_2", "mod_3"), "Moderate states", 
+                             ifelse(model == "sev_2", "Severe states", "Base model")),
+         from_type = case_when(
+           grepl("^M", from) ~ "Moderate",
+           grepl("^S", from) ~ "Severe",
+           TRUE ~ "Other"
+         ),
+         to_type = case_when(
+           grepl("^M", to) ~ "Moderate",
+           grepl("^S", to) ~ "Severe",
+           grepl("^D", to) ~ "Death",
+           grepl("^R", to) ~ "Recovered",
+           TRUE ~ "Other"
+         ),
+         transition = as.character(transition)) %>%
+  dplyr::filter(to_type %in% c("Death", "Recovered"))
+
+```
+
+```{r}
+#| label: probability-matrices-plot
+
+st_grn_pmat <- ggplot(subset(pmat_dat, model != "base_model"), 
+       aes(x = time_days, y = p_estimate, color = model_name, fill = model_name, group = model_name))  +
+  geom_ribbon(data = subset(pmat_dat, model != "base_model"),
+              aes(x = time_days, ymin = p_conf_low, ymax = p_conf_high), 
+              alpha = 0.2, color = NA, show.legend = FALSE) +
+  geom_line(linewidth = 0.8, show.legend = FALSE) +
+  geom_point(size = 2.5)+
+  geom_errorbar(data = subset(pmat_dat, model == "base_model"),
+              aes(x = time_days, ymin = p_conf_low, ymax = p_conf_high),
+              width = 0.5, inherit.aes = FALSE, show.legend = FALSE) +
+  geom_line(data = subset(pmat_dat, model == "base_model"),
+            aes(x = time_days, y = p_estimate),
+            linetype = "dashed", color = "grey30", linewidth = 0.8, inherit.aes = FALSE) +
+  facet_grid(from ~ to_type) +
+  scale_x_continuous(breaks = c(1, 7, 15, 30)) +
+  scale_color_manual(name = "Model structure",
+                     values = st_grn_mod_colors) +
+  guides(
+    # color = guide_legend(override.aes = list(size = 4, shape = 15, alpha = 0.6)),
+    color = "none",
+    fill = "none"
+    ) +
+  scale_fill_manual(name = "Model structure",
+                     values = st_grn_mod_colors) +
+  labs(x = "Time (days)", y = "Transition probability") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "bottom",
+        panel.spacing = unit(1, "lines"))
+
+st_grn_pmat
+
+```
+
+```{r}
+#| label: prevalence-prep
+
+prev_dat <- base_comp$prevalence %>%
+  filter(model_name %in% c("base_model", "mod_2", "mod_3", "sev_2")) %>%
   rename(model = model_name) %>%
   left_join(models_df, by = "model") %>%
   dplyr::select(model_name, time, state, observed_count, 
                 expected_count, expected_count_ll, expected_count_ul,
                 N_at_risk) %>%
-  mutate(state_type = ifelse(grepl("S", state) == TRUE, "S", state))
+  mutate(delta_count = expected_count - observed_count,
+         delta_count_ll = expected_count_ll - observed_count,
+         delta_count_ul = expected_count_ul - observed_count,
+         state_type = case_when(
+           grepl("^M", state) ~ "Moderate",
+           grepl("^S", state) ~ "Severe",
+           grepl("^D", state) ~ "Death",
+           grepl("^R", state) ~ "Recovered",
+           TRUE ~ "Other"
+         ))
 
-ggplot(data = sev_prev, aes(x = factor(time))) +
-  geom_bar(aes(y = N_at_risk), 
-           stat = "identity", alpha = 0.3) +
-  geom_point(aes(y = observed_count, color = model_name, alpha = state), 
-             shape = 5, size = 2, position = position_dodge(width = 1)) +
-  geom_point(aes(y = expected_count, color = model_name, alpha = state), 
-             size = 2, position = position_dodge(width = 1)) +
-  geom_errorbar(aes(ymin = expected_count_ll, 
-                    ymax = expected_count_ul, 
-                    color = model_name, alpha = state), 
-                width = 0.2, position = position_dodge(width = 1)) +
-  facet_wrap(~state_type, scales = "free_y") +
-  labs(x = "Time (days)", y = "Count") +
-  theme_minimal() +
-  scale_alpha_manual(values = c(1, 1, 0.5, 1, 1, 1), 
-                     breaks = c("S", "S1", "S2", "M", "R", "D"),
-                     name = "State")
-  
-ggplot(data = sev_prev, aes(x = factor(time))) +
-  geom_point(aes(y = observed_count, color = model_name, alpha = state), 
-             shape = 5, size = 2, position = position_dodge(width = 1)) +
-  geom_point(aes(y = expected_count, color = model_name, alpha = state), 
-             size = 2, position = position_dodge(width = 1)) +
-  geom_errorbar(aes(ymin = expected_count_ll, 
-                    ymax = expected_count_ul, 
-                    color = model_name, alpha = state), 
-                width = 0.2, position = position_dodge(width = 1)) +
-  facet_wrap(~state_type, scales = "free_y") +
-  labs(x = "Time (days)", y = "Count") +
-  theme_minimal() +
-  scale_alpha_manual(values = c(1, 1, 0.5, 1, 1, 1), 
-                     breaks = c("S", "S1", "S2", "M", "R", "D"),
-                     name = "State")
 ```
-
-## Transition structure
-
-### Simplified transitions
 
 ```{r}
-#| label: simplified-transitions-model-comparison-prevalences
-#| echo: true
+#| label: prevalence-plot
 
-simp_trans_mods <- c("base_model", "reduced_trans")
+# Create plot A (the second plot - Base model)
+plot_A <- ggplot(data = subset(prev_dat, model_name == "Base model"),
+       aes(x = time)) +
+  geom_point(aes(y = expected_count, color = state)) +
+  geom_line(aes(y = expected_count, group = state, color = state)) +
+  geom_ribbon(aes(ymin = expected_count_ll, ymax = expected_count_ul,
+                  fill = state), alpha = 0.2, color = NA, show.legend = FALSE) +
+  geom_point(aes(y = observed_count, fill = state), 
+             shape = 23, size = 3, color = "black") +
+  labs(y = "Count") +
+  scale_x_continuous(breaks = c(1, 7, 15, 30), name = "Time (days)") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0.5),
+        legend.position = "inside",
+        legend.position.inside = c(0.85, 0.5),
+        legend.background = element_rect(fill = "white", color = NA)) +
+  scale_color_viridis_d(name = "State") +
+  scale_fill_viridis_d(name = "State")
 
-trans_prev <- base_comp$prevalence %>%
-  dplyr::filter(model_name %in% simp_trans_mods) %>%
-  rename(model = model_name) %>%
-  left_join(models_df, by = "model") %>%
-  dplyr::select(model_name, time, state, observed_count, 
-                expected_count, expected_count_ll, expected_count_ul,
-                N_at_risk)
+# Calculate y limits across all state plots
+state_plot_data <- subset(prev_dat, model_name != "Base model" | 
+                          (model_name == "Base model" & state %in% c("M", "M1", "M2", "M3", "S", "S1", "S2", "R", "D")))
+y_min <- min(c(state_plot_data$delta_count_ll, state_plot_data$delta_count), na.rm = TRUE)
+y_max <- max(c(state_plot_data$delta_count_ul, state_plot_data$delta_count), na.rm = TRUE)
+
+state_order <- c("M", "M1", "M2", "M3", "S", "S1", "S2", "R", "D")
+
+# Get all unique model names to ensure consistent legends
+all_models <- unique(subset(prev_dat, model_name != "Base model")$model_name)
+
+# Function to create a plot for each state
+create_state_plot <- function(state_name) {
+  # Create a dummy data frame with all model structures to force legend consistency
+  dummy_data <- data.frame(
+    time = rep(NA, length(all_models)),
+    delta_count = rep(NA, length(all_models)),
+    model_name = all_models,
+    state = state_name
+  )
   
-ggplot(trans_prev, aes(x = factor(time))) +
-  geom_bar(aes(y = N_at_risk), 
-           stat = "identity", alpha = 0.3) +
-  geom_point(aes(y = observed_count, color = model_name), 
-             shape = 5, size = 2, position = position_dodge(width = 1)) +
-  geom_point(aes(y = expected_count, color = model_name), 
-             size = 2, position = position_dodge(width = 1)) +
-  geom_errorbar(aes(ymin = expected_count_ll, 
-                    ymax = expected_count_ul, color = model_name), 
-                width = 0.2, position = position_dodge(width = 1)) +
-  facet_wrap(~state, scales = "free_y") +
-  labs(x = "Time (days)", y = "Count") +
-  theme_minimal()
+  ggplot(data = subset(prev_dat, model_name != "Base model" & state == state_name),
+         aes(x = time)) +
+    # Add invisible points with all models to force complete legend
+    geom_point(data = dummy_data, aes(y = delta_count, color = model_name), 
+               alpha = 0, size = 2) +
+    geom_ribbon(aes(ymin = delta_count_ll, 
+                      ymax = delta_count_ul, fill = model_name), 
+                  alpha = 0.4, show.legend = FALSE) +
+    geom_point(aes(y = delta_count, color = model_name), 
+               size = 2, show.legend = FALSE) +
+    geom_line(aes(y = delta_count, color = model_name, group = model_name),
+              show.legend = FALSE) +
+    geom_point(data = subset(prev_dat, model_name == "Base model" & state == state_name),
+           aes(x = time, y = delta_count), show.legend = FALSE) +
+    geom_line(data = subset(prev_dat, model_name == "Base model" & state == state_name),
+              aes(x = time, y = delta_count),
+              linetype = "dashed", color = "grey30", size = 0.8, show.legend = FALSE) +
+    geom_errorbar(data = subset(prev_dat, model_name == "Base model" & state == state_name),
+                aes(x = time, ymin = delta_count_ll, ymax = delta_count_ul),
+                inherit.aes = FALSE, width = 0.4, show.legend = FALSE) +
+    labs(y = "Count", title = state_name) +
+    scale_x_continuous(breaks = c(1, 7, 15, 30), name = "Time (days)") +
+    scale_y_continuous(limits = c(y_min, y_max)) +
+    scale_color_manual(name = "Model structure",
+                       values = st_grn_mod_colors,
+                       drop = FALSE) +
+    scale_fill_manual(name = "Model structure",
+                       values = st_grn_mod_colors,
+                       drop = FALSE) +
+    guides(color = guide_legend(override.aes = list(size = 4, shape = 15, alpha = 0.6)),
+           fill = "none") +
+    theme_minimal(base_size = 12) +
+    theme(strip.text = element_text(face = "bold", hjust = 0.5),
+          plot.title = element_text(hjust = 0.5, size = 12))
+}
 
-ggplot(trans_prev, aes(x = factor(time))) +
-  geom_point(aes(y = observed_count, color = model_name), 
-             shape = 5, size = 2, position = position_dodge(width = 1)) +
-  geom_point(aes(y = expected_count, color = model_name), 
-             size = 2, position = position_dodge(width = 1)) +
-  geom_errorbar(aes(ymin = expected_count_ll, 
-                    ymax = expected_count_ul, color = model_name), 
-                width = 0.2, position = position_dodge(width = 1)) +
-  facet_wrap(~state) +
-  labs(x = "Time (days)", y = "Count") +
-  theme_minimal()
+
+# Create all state plots
+state_plots <- lapply(state_order, create_state_plot)
+names(state_plots) <- state_order
+
+# Combine using patchwork in your desired layout
+st_grn_prev <- (plot_A + state_plots$M) /
+                 (state_plots$M1 + state_plots$M2) /
+                 (state_plots$M3 + state_plots$S) /
+                 (state_plots$S1 + state_plots$S2) /
+                 (state_plots$R + state_plots$D) +
+  plot_layout(guides = "collect", axes = "collect") &
+  theme(legend.position = "bottom")
+
+st_grn_prev
 
 ```
 
+```{r}
+#| label: state-granularity-combined-figure
+#| fig-width: 7
+#| fig-height: 9
+
+design <- "
+134
+135
+136
+237
+238
+239
+23
+"
+
+design <- "
+134
+234
+"
+
+st_grn_soj + st_grn_qmat + st_grn_pmat + #st_grn_prev + 
+  (plot_A + state_plots$M + state_plots$M1 + state_plots$M2 +
+  state_plots$M3 + state_plots$S + state_plots$S1 + 
+  state_plots$S2 + state_plots$R + state_plots$D +
+    plot_layout(ncol = 2)) +
+  plot_layout(design = design, guides = "collect", heights = c(1, 1), widths = c(1, 1, 1.5)) &
+  theme(legend.position = "bottom")
+
+ggsave(here("figs", "model-structure-state-granularity-combined.png"), 
+       width = 10, height = 8)
+
+```
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```
