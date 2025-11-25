@@ -32,11 +32,14 @@ library(tableone)
 library(Hmisc)
 library(ggpubr)
 library(viridis)
+<<<<<<< HEAD
 library(gridExtra)
 library(gtable)
 library(grid)
 library(gt)
 library(ggh4x)
+=======
+>>>>>>> 3788413df3b30f7031da107ca1f12a1e007217e0
 ```
 
 ```{r}
@@ -45,7 +48,10 @@ library(ggh4x)
 
 source(here("R", "00-config.R"))
 source(here("R", "00f-fns-tbl_figs.R"))
+<<<<<<< HEAD
 source(here("R", "00d-fns-model_eval.R"))
+=======
+>>>>>>> 3788413df3b30f7031da107ca1f12a1e007217e0
 
 pt_stg <- readRDS(here("data", "pt_stg.rds"))
 
@@ -61,6 +67,7 @@ base_structure_comp <- readRDS(here("data", "base_structure_comp.rds"))
 ```
 
 ```{r}
+<<<<<<< HEAD
 #| label: time-summaries
 
 time_dat <- pt_stg %>%
@@ -165,6 +172,8 @@ table_plot <- ggplot() +
 ```
 
 ```{r}
+=======
+>>>>>>> 3788413df3b30f7031da107ca1f12a1e007217e0
 #| label: markov-comp
 
 intersection <- intersect(
@@ -172,6 +181,7 @@ intersection <- intersect(
   names(base_comp$model_summary)
 )
 
+<<<<<<< HEAD
 intersection <- setdiff(intersection, "base_variables")
 
 base_comp_temp <- base_comp$model_summary %>%
@@ -568,3 +578,21 @@ ggsave(
 )
 
 ```
+=======
+base_comp_temp <- base_comp$model_summary %>%
+      mutate(base_variables = unlist(base_variables)) %>%
+      dplyr::select(intersection)
+
+markov_comp_temp <- markov_comp$model_summary %>%
+  mutate(base_variables = unlist(base_variables)) %>%
+  dplyr::select(intersection)
+
+all_comp <- base_comp_temp %>%
+  rbind(markov_comp_temp)
+
+
+```
+
+
+
+>>>>>>> 3788413df3b30f7031da107ca1f12a1e007217e0

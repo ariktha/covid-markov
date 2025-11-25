@@ -78,7 +78,10 @@ comparisons](images/suppfig-univar_loglik_plot.png)
 
 ## Figure 4: Markov property
 
+<<<<<<< HEAD
 ![Markov property](images/markov-property.png)
+=======
+>>>>>>> 3788413df3b30f7031da107ca1f12a1e007217e0
 
 ![Markov property alt](images/markov-property-structure-effects.png)
 
