@@ -32,6 +32,12 @@ library(tableone)
 library(Hmisc)
 library(ggpubr)
 library(viridis)
+library(gridExtra)
+library(gtable)
+library(grid)
+library(gt)
+library(ggh4x)
+library(scales)
 ```
 
 ```{r}
@@ -40,6 +46,7 @@ library(viridis)
 
 source(here("R", "00-config.R"))
 source(here("R", "00f-fns-tbl_figs.R"))
+source(here("R", "00d-fns-model_eval.R"))
 
 pt_stg <- readRDS(here("data", "pt_stg.rds"))
 
@@ -55,6 +62,110 @@ base_structure_comp <- readRDS(here("data", "base_structure_comp.rds"))
 ```
 
 ```{r}
+#| label: time-summaries
+
+time_dat <- pt_stg %>%
+  dplyr::filter(model == "base_model") %>%
+  dplyr::select(deid_enc_id, date, state) %>%
+  distinct() %>%
+  dplyr::filter(state %in% c("M", "S")) %>%
+  group_by(deid_enc_id, state) %>%
+  summarise(n_days = n(), .groups = "drop") %>%
+  full_join(expand.grid(
+    deid_enc_id = unique(pt_stg$deid_enc_id),
+    state = c("M", "S")) %>%
+  mutate(across(everything(), as.character)),
+  by = c("deid_enc_id", "state")) %>%
+  replace_na(list(n_days = 0)) %>%
+  arrange(deid_enc_id, state)
+
+# Count total rows and zero rows for each state
+
+zero_days <- time_dat %>%
+  group_by(state) %>%
+  summarise(
+    n_total = n(),
+    n_zero_days = sum(n_days == 0),
+    mean_days = mean(n_days),
+    median_days = median(n_days),
+    sd_days = sd(n_days),
+    min_days = min(n_days),
+    max_days = max(n_days),
+    iqr_days = IQR(n_days),
+    .groups = "drop"
+  ) %>%
+  mutate(prop_zero_days = 100*n_zero_days / n_total,
+         zero_text = paste0(n_zero_days, " (", round(prop_zero_days, 1), "%)"),
+         mean_text = paste0(round(mean_days, 1), " (", round(sd_days, 1), ")"),
+         median_text = paste0(median_days, " (", iqr_days, ")"),
+         range_text = paste0(min_days, " - ", max_days))
+
+# Create your summary table as a data frame
+table_data <- zero_days %>%
+  dplyr::select(state, zero_text,
+                mean_text, range_text) %>%
+  rename(State = state, 
+         `Encounters with\n0 days in state` = zero_text,
+         `mean (SD)` = mean_text,
+         range = range_text)
+
+library(grid)
+library(gtable)
+
+# Create a manual gtable with the exact structure
+# Define the data
+header_row1 <- c("State", "Encounters with\n0 days in state", "Days in state", "")
+header_row2 <- c("", "", "mean (SD)", "range")
+data_rows <- as.matrix(table_data)
+
+# Create text grobs for headers
+make_header <- function(text, bold = FALSE) {
+  textGrob(text, gp = gpar(fontsize = 8, fontface = "plain", fontfamily = "sans"))
+}
+
+# Build the table manually
+table_grob <- gtable(
+  widths = unit(rep(1, 4), "null"),
+  heights = unit(c(1, 1, rep(1, nrow(data_rows))), "lines")
+)
+
+# Row 1: State spans 2 rows, Encounters spans 2 rows, "Days in state" spans 2 cols
+table_grob <- gtable_add_grob(table_grob, make_header("State"), t=1, b=2, l=1, r=1)
+table_grob <- gtable_add_grob(table_grob, make_header("Encounters with\n0 days in state"), t=1, b=2, l=2, r=2)
+table_grob <- gtable_add_grob(table_grob, make_header("Days in state"), t=1, b=1, l=3, r=4)
+
+# Row 2: mean (SD) and range
+table_grob <- gtable_add_grob(table_grob, make_header("mean (SD)"), t=2, l=3, r=3)
+table_grob <- gtable_add_grob(table_grob, make_header("range"), t=2, l=4, r=4)
+
+# Add data rows
+for(i in 1:nrow(data_rows)) {
+  for(j in 1:4) {
+    table_grob <- gtable_add_grob(table_grob, 
+                                  textGrob(data_rows[i,j], gp = gpar(fontsize = 8)),
+                                  t = i+2, l = j, r = j)
+  }
+}
+
+# Convert to ggplot
+# table_plot <- ggplot() + 
+#   annotation_custom(table_grob, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+#   theme_void() +
+#   coord_cartesian(clip = "off") +
+#   theme(plot.margin = margin(0, 0, 0, 0))
+
+table_plot <- ggplot() + 
+  annotation_custom(table_grob) +
+  xlim(0, 1) + 
+  ylim(0, 1) +
+  theme_void() +
+  coord_cartesian(clip = "off", expand = FALSE)
+
+# desc_plot / table_plot + plot_layout(heights = c(2, 1))
+
+```
+
+```{r}
 #| label: markov-comp
 
 intersection <- intersect(
@@ -62,19 +173,533 @@ intersection <- intersect(
   names(base_comp$model_summary)
 )
 
+intersection <- setdiff(intersection, "base_variables")
+
 base_comp_temp <- base_comp$model_summary %>%
-      mutate(base_variables = unlist(base_variables)) %>%
-      dplyr::select(intersection)
+  dplyr::filter(model_name %in% c("base_model", "hx_sev")) %>%
+  mutate(base_variables = unlist(base_variables)) %>%
+  dplyr::select(all_of(intersection))
 
 markov_comp_temp <- markov_comp$model_summary %>%
   mutate(base_variables = unlist(base_variables)) %>%
-  dplyr::select(intersection)
+  dplyr::select(all_of(intersection))
 
 all_comp <- base_comp_temp %>%
-  rbind(markov_comp_temp)
+  rbind(markov_comp_temp) %>%
+  dplyr::filter(constraint_type != "constant_across_transitions")
 
+all_comp_long <- all_comp %>%
+  dplyr::select(model_name, model_structure, covariate, has_splines, AIC, BIC, loglik, n_params) %>%
+  mutate(covariate = str_remove_all(covariate, " .*$")) %>%
+  pivot_longer(cols = c(AIC, BIC, loglik, n_params),
+               names_to = "metric",
+               values_to = "value") %>%
+  mutate(
+    model_structure = factor(
+      model_structure,
+      levels = c("base_model", "hx_sev"),
+      labels = c("Base Model", "Severity history as a state"),
+      ordered = TRUE
+    ),
+    has_splines = factor(
+      has_splines,
+      levels = c(FALSE, TRUE),
+      labels = c("Without Splines", "With Splines"),
+      ordered = TRUE
+    ),
+    covariate = factor(
+      covariate,
+      levels = c("None", "hx_sev_time", "time_in_current_state"),
+      labels = c("No\ncovariates", "Time in\nsevere", "Time in\ncurrent state"),
+      ordered = TRUE
+  ),
+    metric = factor(
+      metric,
+      levels = c("n_params", "loglik", "AIC", "BIC"),
+      labels = c("Number of Parameters", "Log-Likelihood", "AIC", "BIC"),
+      ordered = TRUE
+    )
+  )
+
+```
+
+```{r}
+#| label: markov-comp-plot
+
+# Define limits for each facet
+y_scales <- list(
+  `Number of Parameters` = scale_y_continuous(limits = c(5, 26), breaks = seq(5, 25, by = 10)),
+  `Log-Likelihood` = scale_y_continuous(limits = c(-4550, -4400), n.breaks = 3),
+  `AIC` = scale_y_continuous(limits = c(8800, 9100), n.breaks = 3),
+  `BIC` = scale_y_continuous(limits = c(9000, 9150), n.breaks = 3)
+)
+
+temp <- all_comp_long %>%
+  group_by(metric) %>%
+  summarise(min_value = min(value),
+            max_value = max(value))
+
+comp_plot <- ggplot(
+  subset(all_comp_long, covariate != "No\ncovariates"),
+  aes(
+    x = covariate,
+    y = value,
+    alpha = model_structure,
+    shape = has_splines,
+    color = covariate
+  )) +
+  geom_point(size = 3, position = position_dodge(width = 0.3)) +
+  facet_wrap(~metric, scales = "free_y", ncol = 1) +
+  facetted_pos_scales(y = y_scales) +  # Add this line
+  theme_minimal() +
+  geom_hline(data = all_comp_long %>% dplyr::filter(model_name == "base_model"),
+             aes(yintercept = value),
+             linetype = "dashed",
+             alpha = 0.5) +
+  scale_color_manual(
+    values = c(
+      "Time in\nsevere" = "#8d5500",
+      "Time in\ncurrent state" = "#0061ed"
+    ),
+    guide = "none"
+  ) +
+  scale_alpha_manual(
+    values = c(
+      "Base Model" = 1,
+      "Severity history as a state" = 0.2
+    ),
+    guide = "none"
+  ) +
+  # scale_y_continuous(breaks = breaks_extended(n = 4)) +
+  labs(
+    title = "Model Comparison: Markov Property",
+    x = "Covariate",
+    color = "Model Structure",
+    shape = "Has Splines"
+  ) +
+  theme(legend.position = "bottom",
+        plot.title = element_blank(),
+        axis.title = element_blank(),
+        legend.box = "vertical",
+        legend.margin = margin(),
+        legend.spacing.y = unit(0.1, 'cm'))
+
+comp_plot
+
+```
+
+```{r}
+#| label: covariate-effect-size
+
+hrs_markov_mods <- list(
+  base_time_severe = markov_models$base_time_severe,
+  base_time_state = markov_models$base_time_state
+)
+
+hrs_markov <- tidy_msm_hazards(hrs_markov_mods, hazard_scale = 10) %>%
+  mutate(
+    covariate = factor(
+      covariate,
+      levels = c("None", "hx_sev_time", "time_in_current_state"),
+      labels = c("No covariates", "Time in severe", "Time in current state"),
+      ordered = TRUE
+  )
+)
+
+haz_plot <- ggplot(hrs_markov, 
+       aes(x = transition, y = hazard_ratio, color = covariate)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  geom_errorbar(aes(ymin = hr_lower, ymax = hr_upper),
+                position = position_dodge(width = 0.5), width = 0.2,
+                show.legend = FALSE) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray50") +
+  theme_minimal() +
+  scale_color_manual(values = c("Time in severe" = "#8d5500", "Time in current state" = "#0061ed"),
+                     name = "Covariate") +
+  labs(
+    title = "Hazard Ratios for Markov Models",
+    x = "Transition",
+    y = "Hazard Ratio"
+  ) +
+  theme(legend.position = "bottom",
+        plot.title = element_blank(),
+        legend.box = "vertical",
+        legend.margin = margin(),
+        legend.spacing.y = unit(0.1, 'cm')) +
+  scale_y_continuous(n.breaks = 6, limits = c(0.2, 2)) +
+  guides(color = "none")
+
+haz_plot
+
+```
+
+```{r}
+#| label: spline-covariate-effect-size
+
+hx_sev_hazards_spline <- extract_spline_hazard_ratios(
+  list(base_time_severe_spline = markov_models$base_time_severe_spline),
+  spline_var = "hx_sev_time",
+  reference_value = NULL,
+  grid_length = 100,
+  ci_level = 0.95,
+  verbose = FALSE
+  ) %>%
+  mutate(to_state = factor(to_state, levels = c("M", "S", "D", "R"), ordered = TRUE))
+
+state_time_hazards_spline <- extract_spline_hazard_ratios(
+  list(base_time_state_spline = markov_models$base_time_state_spline),
+  spline_var = "time_in_current_state",
+  reference_value = NULL,
+  grid_length = 100,
+  ci_level = 0.95,
+  verbose = FALSE
+  ) %>%
+  mutate(to_state = factor(to_state, levels = c("M", "S", "D", "R"), ordered = TRUE))
+
+hx_sev_hazards_linear <- extract_linear_hazard_ratios(
+  fitted_msm_models = list(base_time_severe = markov_models$base_time_severe),
+  linear_var = "hx_sev_time",
+  reference_value = NULL
+)
+
+state_time_hazards_linear <- extract_linear_hazard_ratios(
+  fitted_msm_models = list(base_time_state = markov_models$base_time_state),
+  linear_var = "time_in_current_state",
+  reference_value = NULL
+)
+
+time_hazards_long <- hx_sev_hazards_spline %>%
+  mutate(covariate = "Time in severe") %>%
+  rbind(state_time_hazards_spline %>% mutate(covariate = "Time in current state")) %>%
+  dplyr::select(transition, from_state, to_state, covariate,
+                covariate_value, hr, hr_lower, hr_upper) %>%
+  mutate(model_type = "Spline") %>%
+  rbind(hx_sev_hazards_linear %>%
+          dplyr::select(transition, from_state, to_state,
+                    covariate_value, hr, hr_lower, hr_upper) %>%
+          mutate(covariate = "Time in severe",
+                 model_type = "Linear")) %>%
+  rbind(hx_sev_hazards_linear %>%
+          dplyr::select(transition, from_state, to_state,
+                    covariate_value, hr, hr_lower, hr_upper) %>%
+          mutate(covariate = "Time in current state",
+                 model_type = "Linear")) %>%
+  mutate(transition = factor(transition,
+                             levels = c("M -> S", "S -> M", "M -> D",
+                                        "S -> D", "M -> R", "S -> R"),
+                             ordered = TRUE))
+
+haz_spline_plot <- ggplot(subset(time_hazards_long, model_type == "Spline"), 
+       aes(x = covariate_value, y = hr, fill = covariate)) +
+  geom_ribbon(aes(ymin = pmax(hr_lower, 0.1), 
+                  ymax = pmin(hr_upper, 10)), alpha = 0.2, color = NA) +
+  geom_line(aes(color = covariate), show.legend = FALSE) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  # geom_hline(aes(yintercept = )) +
+  # geom_vline(xintercept = mean_age, linetype = "dotted") +
+  facet_wrap(~ transition, nrow = 3) +
+  scale_y_log10(limits = c(0.1, 10)) +
+  scale_x_continuous(limits = c(0, 50)) +
+  scale_color_manual(values = c("Time in severe" = "#8d5500", "Time in current state" = "#0061ed"),
+                     name = "Covariate") +
+  scale_fill_manual(values = c("Time in severe" = "#8d5500", "Time in current state" = "#0061ed"),
+                     name = "Covariate") +
+  labs(x = "Days", y = "Hazard Ratio (log scale)") +
+  theme_minimal() +
+  guides(fill = guide_legend(override.aes = list(alpha = 0.5))) +
+  theme(plot.margin = margin(t = 0, r = 1, b = 0, l = 1, unit = "pt"),
+        legend.position = "bottom")
+
+haz_spline_plot
+
+```
+
+```{r}
+#| label: combined-plot-slide-deck
+
+design2 <- "
+3
+1
+2
+"
+
+comp_plot + haz_plot + table_plot +
+  plot_layout(design = design2,
+              guides = "collect",
+              heights = c(0.3, 1, 0.6)) &
+  theme(legend.position = "bottom",
+        legend.nrow = 2,
+        legend.box = "vertical")
+
+ggsave(
+  filename = here("figs", "markov-property-slides.png"),
+  width = 4,
+  height = 7,
+  units = "in",
+  dpi = 300
+)
+
+```
+
+```{r}
+#| label: history-of-severe-state
+
+hx_sev_pmats <- base_comp$pmats %>%
+  dplyr::filter(model_structure %in% c("base_model", "hx_sev") &
+                  statename %in% c("M", "S", "MS")) %>%
+  mutate(from_type = ifelse(statename %in% c("M", "MS"), "Moderate", "Severe"),
+         to_type = ifelse(tostatename %in% c("M", "MS"), "Moderate", tostatename)) %>%
+  mutate(groupname = case_when(
+    model_structure == "base_model" ~ "Base Model",
+    model_structure == "hx_sev" & statename == "S" ~ "History of Severe; Severe",
+    model_structure == "hx_sev" & statename == "M" & tostatename %in% c("D", "R", "S") ~ "History of Severe; from M",
+    model_structure == "hx_sev" & statename == "MS" & tostatename %in% c("D", "R", "S") ~ "History of Severe; from MS",
+    model_structure == "hx_sev" & statename == "M" & tostatename == "M" ~ "History of Severe; stay in M",
+    model_structure == "hx_sev" & statename == "M" & tostatename == "MS" ~ "History of Severe; M to MS",
+    model_structure == "hx_sev" & statename == "MS" & tostatename == "MS" ~ "History of Severe; stay in MS"
+  )) %>%
+  mutate(to_type = factor(to_type, levels = c("Moderate", "S", "D", "R"), ordered = TRUE),
+         from_type = factor(from_type, levels = c("Moderate", "Severe"), ordered = TRUE))
+
+str_pmat_plot <- ggplot(hx_sev_pmats,
+       aes(x = t_value, 
+           color = groupname)) +
+  geom_line(aes(y = estimate, linetype = model_structure), 
+            linewidth = 1, alpha = 0.7) +
+  geom_point(aes(y = estimate), size = 1, alpha = 0.7, position = position_dodge(width = 0.8)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                alpha = 0.7, position = position_dodge(width = 0.4)) +
+  scale_y_continuous(limits = c(0, 1), name = "Probability") +
+  scale_x_continuous(name = "Time (days)") +
+  facet_grid(from_type~to_type) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_blank(),
+        legend.box = "vertical",
+        legend.margin = margin(),
+        legend.spacing.y = unit(0.1, 'cm'),
+        legend.title = element_blank()) 
+
+hx_sev_soj <- tidy_msm_sojourns(
+  list(
+    base_model = base_models$base_model,
+    hx_sev = base_models$hx_sev),
+  covariates_list = NULL,
+  ci_method = "delta"
+) %>%
+  mutate(
+    state_type = ifelse(state %in% c("M", "MS"), "Moderate", "Severe"),
+    state_type = factor(state_type, levels = c("Moderate", "Severe"), ordered = TRUE),
+    model_structure = factor(
+      model_structure,
+      levels = c("base_model", "hx_sev"),
+      labels = c("Base Model", "Severity history as a state"),
+      ordered = TRUE
+    )
+  )
+
+str_soj_plot <- ggplot(hx_sev_soj,
+       aes(y = state_type, 
+           x = estimates,
+           color = state,
+           group = interaction(model_structure, state))) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  geom_errorbarh(aes(xmin = L, xmax = U, linetype = model_structure),
+                 position = position_dodge(width = 0.5), height = 0.2,
+                 show.legend = FALSE) +
+  scale_x_continuous(name = "Sojourn Time (days)", limits = c(0, 20)) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_blank(),
+        legend.box = "vertical",
+        legend.margin = margin(),
+        legend.spacing.y = unit(0.1, 'cm'),
+        legend.title = element_blank())
+
+hx_sev_prev <- base_comp$prevalence %>%
+  dplyr::select(model_structure, time, state, observed_count, expected_count_ll, expected_count_ul, expected_count) %>%
+  # pivot_longer(
+  #   cols = c(observed_count, expected_count_ll, expected_count_ul, expected_count),
+  #   names_to = "type",
+  #   values_to = "prevalence"
+  # ) %>%
+  dplyr::filter(model_structure %in% c("base_model", "hx_sev")) %>%
+  mutate(
+    state_type = ifelse(state %in% c("M", "MS"), "Moderate", "Severe"),
+    state_type = factor(state_type, levels = c("Moderate", "Severe"), ordered = TRUE),
+    model_structure = factor(
+      model_structure,
+      levels = c("base_model", "hx_sev"),
+      labels = c("Base Model", "Severity history as a state"),
+      ordered = TRUE
+    )
+  ) %>%
+  dplyr::filter(state %in% c("M", "MS"))
+
+str_prev_plot <- ggplot(hx_sev_prev,
+       aes(x = time, 
+           color = interaction(model_structure, state),
+           fill = interaction(model_structure, state),
+           linetype = model_structure)) +
+  geom_line(aes(y = expected_count), size = 1, alpha = 0.7) +
+  geom_ribbon(aes(ymin = expected_count_ll, ymax = expected_count_ul),
+              alpha = 0.2, color = NA) +
+  geom_point(aes(y = observed_count), size = 3, alpha = 0.7, shape = 23, color = "black") +
+  scale_y_continuous(name = "Prevalence (count)") +
+  scale_x_continuous(name = "Time (days)", breaks = c(1, 7, 15, 30)) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_blank(),
+        legend.box = "vertical",
+        legend.margin = margin(),
+        legend.spacing.y = unit(0.1, 'cm'),
+        legend.title = element_blank())
+
+# design2 <- "
+# 11
+# 23
+# "
+# 
+# str_pmat_plot + str_soj_plot + str_prev_plot +
+#   plot_layout(design = design2)
+# 
+# ggsave(
+#   filename = here("figs", "markov-property-structure-effects.png"),
+#   width = 8,
+#   height = 6,
+#   units = "in",
+#   dpi = 300
+# )
+
+```
+
+```{r}
+
+hx_sev_sub <- hx_sev_pmats %>%
+  dplyr::filter(from_type == "Moderate") %>%
+  dplyr::filter(to_type != "Moderate") %>%
+  mutate(legend_lbl = case_when(
+    model_structure == "base_model" ~ "Base Model",
+    model_structure == "hx_sev" & statename == "M" ~ "History of Severe; from M",
+    model_structure == "hx_sev" & statename == "MS" ~ "History of Severe; from MS"
+  ))
+
+hx_sev_plot <- ggplot(hx_sev_sub,
+       aes(x = t_value, 
+           color = legend_lbl)) +
+  geom_line(aes(y = estimate, linetype = legend_lbl), 
+            linewidth = 1, alpha = 0.7) +
+  geom_point(aes(y = estimate), size = 1, alpha = 0.7, position = position_dodge(width = 0.8)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                alpha = 0.7, position = position_dodge(width = 0.4), width = 3,
+                show.legend = FALSE) +
+  scale_y_continuous(limits = c(0, 1), name = "Probability") +
+  scale_x_continuous(name = "Time (days)") +
+  scale_linetype_manual(breaks = c("Base Model", "History of Severe; from M", "History of Severe; from MS"),
+                        values = c("solid", "solid", "dotdash")) +
+  scale_color_manual(breaks = c("Base Model", "History of Severe; from M", "History of Severe; from MS"),
+                     values = c("black", "grey50", "grey50")) +
+  facet_wrap(~to_type,
+             labeller = labeller(to_type = function(x) paste0("To state: ", x))) +
+  theme_minimal() +
+  theme(plot.title = element_blank(),
+        legend.position = "inside",
+        legend.position.inside = c(0.32, 0.75),
+        legend.background = element_rect(fill = alpha('white', 0.6), color = NA),
+        # legend.position = "bottom",
+        legend.box = "horizontal",
+        legend.margin = margin(),
+        legend.spacing.y = unit(0.1, 'cm'),
+        legend.title = element_blank())
+
+hx_sev_plot
+
+```
+
+```{r}
+#| label: final-patchwork-plot
+
+design <- "
+13
+24
+"
+
+hx_sev_plot + comp_plot + 
+  haz_plot + haz_spline_plot +
+  plot_layout(design = design,
+              heights = c(1, 2),
+              widths = c(2.5, 3)) +
+  plot_annotation(tag_levels = "A")
+
+ggsave(
+  filename = here("figs", "markov-property-final.png"),
+  width = 8,
+  height = 7,
+  units = "in",
+  dpi = 300,
+  bg = "white"
+)
 
 ```
 
 
+```{r final-patchwork}
+
+library(cowplot)
+
+design <- "
+13
+24
+"
+
+# Create plots without legends
+hx_sev_plot_no_leg <- hx_sev_plot + theme(legend.position = "none")
+comp_plot_no_leg <- comp_plot + theme(legend.position = "none")
+haz_plot_no_leg <- haz_plot + theme(legend.position = "none")
+haz_spline_plot_no_leg <- haz_spline_plot + theme(legend.position = "none")
+
+# Create the main plot without legends
+main_plot <- hx_sev_plot_no_leg + comp_plot_no_leg + 
+  haz_plot_no_leg + haz_spline_plot_no_leg +
+  plot_layout(design = design,
+              heights = c(1, 2),
+              widths = c(2.5, 3))
+
+# Extract individual legends
+legend_color <- get_legend(hx_sev_plot + 
+                                guides(linetype = "none") + theme(legend.position = "bottom"))
+legend_linetype <- get_legend(hx_sev_plot + 
+                                guides(color = "none") + 
+                                theme(legend.position = "bottom"))
+legend_shape <- get_legend(comp_plot + theme(legend.position = "bottom"))
+legend_fill <- get_legend(haz_plot + theme(legend.position = "bottom"))
+
+# Arrange legends in 2x2 grid
+legend_grid <- plot_grid(
+  legend_color, legend_shape,
+  legend_linetype, legend_fill,
+  ncol = 2,
+  nrow = 2
+)
+
+# Combine main plot with legend grid
+final_plot <- plot_grid(
+  main_plot,
+  legend_grid,
+  ncol = 1,
+  rel_heights = c(10, 1)  # Adjust this ratio as needed
+)
+
+final_plot
+
+ggsave(
+  filename = here("figs", "markov-property-final.png"),
+  width = 8,
+  height = 7,
+  units = "in",
+  dpi = 300,
+  bg = "white"
+)
+
+```
 

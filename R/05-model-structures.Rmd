@@ -150,8 +150,8 @@ pred_err_summ$metric <- factor(pred_err_summ$metric, levels = metric_order)
 facet_limits <- data.frame(
   metric = factor(metric_order,
                   levels = metric_order),
-  ymin = c(0.07, 0.18, 0.5, 0.5, NA, NA, 5, 5),
-  ymax = c(0.09, 0.28, 1, 1, NA, NA, 10, 10)
+  ymin = c(0.07, 0.18, 0.5, 0.8, NA, NA, 5, 5),
+  ymax = c(0.09, 0.28, 0.8, 0.9, NA, NA, 10, 8)
 )
 
 model_structure_tib <- tibble(
@@ -170,7 +170,7 @@ pred_err_summ <- pred_err_summ %>%
 ```{r}
 #| label: plot-pred-perf
 
-ggplot(subset(pred_err_summ, model_name != "Base model"))  +
+ggplot(subset(pred_err_summ, model_name != "Base model" & model_name != "History of severe"))  +
   geom_blank(data = facet_limits, aes(x = 1, y = ymin)) +
   geom_blank(data = facet_limits, aes(x = 1, y = ymax)) +
   geom_rect(data = subset(pred_err_summ, model_name == "Base model"),
@@ -183,10 +183,16 @@ ggplot(subset(pred_err_summ, model_name != "Base model"))  +
              aes(yintercept = mean), linetype = "dashed") +
   facet_wrap(~ metric, scales = "free_y", ncol = 2,
              labeller = labeller(metric = metric_labels)) +
-  scale_x_discrete(limits = c("2 moderate states", "3 moderate states", "2 severe states", 
-                               "History of severe", "Simplified transitions"),
-                   labels = c("2 moderate\nstates", "3 moderate\nstates", "2 severe\nstates", 
-                               "State for history\nof severe", "Simplified\ntransitions")) +
+  scale_x_discrete(limits = c("3 moderate states", 
+                              "2 moderate states", 
+                              "2 severe states", 
+                              # "History of severe", 
+                              "Simplified transitions"),
+                   labels = c("3 moderate\nstates", 
+                              "2 moderate\nstates", 
+                              "2 severe\nstates", 
+                               # "State for history\nof severe", 
+                              "Simplified\ntransitions")) +
   scale_y_continuous(breaks = scales::pretty_breaks(n = 3)) +
   scale_color_manual(values = c("#DB9E9E", "#287d7d"),
                      breaks = c("State granularity", "Transition structure"),

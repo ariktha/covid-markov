@@ -133,6 +133,11 @@ trend_colors <- c(
   "Other" = "gray50"
 )
 
+state_colors <- tibble(
+  states = c("M", "S", "D", "R"),
+  color = c("#3484A5FF", "#403872FF", "#0B0405FF", "#60CEACFF")
+)
+
 
 stage_order <- c("4", "5", "6", "7", "8", "9", "10", "11")
 state_order <- c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2", "D", "R")
