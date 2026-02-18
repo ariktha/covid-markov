@@ -201,7 +201,7 @@ pmat_plot <- ggplot(pmat_long, aes(x = time, y = p_estimate, color = trend)) +
   geom_line(size = 1, show.legend = FALSE) +
   geom_ribbon(aes(ymin = p_conf_low, ymax = p_conf_high, fill = trend), 
               alpha = 0.5, color = NA, show.legend = FALSE) +
-  scale_color_manual(values = trend_colors, name = "Transition trend") +
+  scale_color_manual(values = trend_colors, name = "Trend") +
   scale_fill_manual(values = trend_colors) +
   facet_grid(from ~ to) +
   theme_minimal(base_size = 12) +
@@ -212,7 +212,7 @@ pmat_plot <- ggplot(pmat_long, aes(x = time, y = p_estimate, color = trend)) +
                      name = "Time since entry (days)") +
   scale_y_continuous(breaks = seq(0, 1, by = 0.5), limits = c(0, 1),
                      name = "Transition probability") +
-  guides(color = guide_legend(override.aes = list(size = 4, shape = 15, alpha = 1)))
+  guides(color = guide_legend(override.aes = list(size = 4, shape = 15, alpha = 1), nrow = 2, byrow = TRUE))
 
 pmat_plot
 
@@ -367,21 +367,21 @@ cv_plot_slides
 #| label: combined-plot
 
 design <- "
-AB
-CD
-CE
+AC
+BC
+BC
 "
 
 st_plot + 
-  trans_intens_plot +
-  pmat_plot +
-  soj_plot +
-  prev_plot +
-  plot_layout(design = design, 
-              guides = "collect",
-              heights = c(1.5, 0.8, 1.2),
+  (soj_plot / prev_plot + plot_layout(guides = "collect")) +
+  (trans_intens_plot / pmat_plot + plot_layout(guides = "collect") &
+     theme(legend.position = "bottom")) +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(design = design,
+              heights = c(1.2, 1.5),
               widths = c(1, 1)) & 
-  theme(legend.position = "bottom")
+  theme(legend.position = "bottom",
+        plot.tag = element_text(size = 14))
 
 ggsave(here("figs", "base_model_summary_plots.png"), 
        width = 9, height = 5, dpi = 300)

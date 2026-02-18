@@ -32,14 +32,12 @@ library(tableone)
 library(Hmisc)
 library(ggpubr)
 library(viridis)
-<<<<<<< HEAD
 library(gridExtra)
 library(gtable)
 library(grid)
 library(gt)
 library(ggh4x)
-=======
->>>>>>> 3788413df3b30f7031da107ca1f12a1e007217e0
+library(scales)
 ```
 
 ```{r}
@@ -48,10 +46,7 @@ library(ggh4x)
 
 source(here("R", "00-config.R"))
 source(here("R", "00f-fns-tbl_figs.R"))
-<<<<<<< HEAD
 source(here("R", "00d-fns-model_eval.R"))
-=======
->>>>>>> 3788413df3b30f7031da107ca1f12a1e007217e0
 
 pt_stg <- readRDS(here("data", "pt_stg.rds"))
 
@@ -67,7 +62,6 @@ base_structure_comp <- readRDS(here("data", "base_structure_comp.rds"))
 ```
 
 ```{r}
-<<<<<<< HEAD
 #| label: time-summaries
 
 time_dat <- pt_stg %>%
@@ -172,8 +166,6 @@ table_plot <- ggplot() +
 ```
 
 ```{r}
-=======
->>>>>>> 3788413df3b30f7031da107ca1f12a1e007217e0
 #| label: markov-comp
 
 intersection <- intersect(
@@ -181,7 +173,6 @@ intersection <- intersect(
   names(base_comp$model_summary)
 )
 
-<<<<<<< HEAD
 intersection <- setdiff(intersection, "base_variables")
 
 base_comp_temp <- base_comp$model_summary %>%
@@ -237,10 +228,10 @@ all_comp_long <- all_comp %>%
 
 # Define limits for each facet
 y_scales <- list(
-  `Number of Parameters` = scale_y_continuous(limits = c(5, 26), n.breaks = 4),
-  `Log-Likelihood` = scale_y_continuous(limits = c(-4550, -4400), n.breaks = 4),
-  `AIC` = scale_y_continuous(limits = c(8800, 9100), n.breaks = 4),
-  `BIC` = scale_y_continuous(limits = c(9000, 9150), n.breaks = 4)
+  `Number of Parameters` = scale_y_continuous(limits = c(5, 26), breaks = seq(5, 25, by = 10)),
+  `Log-Likelihood` = scale_y_continuous(limits = c(-4550, -4400), n.breaks = 3),
+  `AIC` = scale_y_continuous(limits = c(8800, 9100), n.breaks = 3),
+  `BIC` = scale_y_continuous(limits = c(9000, 9150), n.breaks = 3)
 )
 
 temp <- all_comp_long %>%
@@ -249,7 +240,7 @@ temp <- all_comp_long %>%
             max_value = max(value))
 
 comp_plot <- ggplot(
-  all_comp_long,
+  subset(all_comp_long, covariate != "No\ncovariates"),
   aes(
     x = covariate,
     y = value,
@@ -267,7 +258,6 @@ comp_plot <- ggplot(
              alpha = 0.5) +
   scale_color_manual(
     values = c(
-      "No\ncovariates" = "black",
       "Time in\nsevere" = "#8d5500",
       "Time in\ncurrent state" = "#0061ed"
     ),
@@ -280,6 +270,7 @@ comp_plot <- ggplot(
     ),
     guide = "none"
   ) +
+  # scale_y_continuous(breaks = breaks_extended(n = 4)) +
   labs(
     title = "Model Comparison: Markov Property",
     x = "Covariate",
@@ -335,7 +326,8 @@ haz_plot <- ggplot(hrs_markov,
         legend.box = "vertical",
         legend.margin = margin(),
         legend.spacing.y = unit(0.1, 'cm')) +
-  scale_y_continuous(n.breaks = 6, limits = c(0.2, 2))
+  scale_y_continuous(n.breaks = 6, limits = c(0.2, 2)) +
+  guides(color = "none")
 
 haz_plot
 
@@ -414,32 +406,34 @@ haz_spline_plot <- ggplot(subset(time_hazards_long, model_type == "Spline"),
                      name = "Covariate") +
   labs(x = "Days", y = "Hazard Ratio (log scale)") +
   theme_minimal() +
-  guides(color = "none", fill = "none") +
-  theme(plot.margin = margin(t = 0, r = 1, b = 0, l = 1, unit = "pt"))
+  guides(fill = guide_legend(override.aes = list(alpha = 0.5))) +
+  theme(plot.margin = margin(t = 0, r = 1, b = 0, l = 1, unit = "pt"),
+        legend.position = "bottom")
 
 haz_spline_plot
 
 ```
 
 ```{r}
-#| label: combined-plot
+#| label: combined-plot-slide-deck
 
-design <- "
-32
-12
-14
+design2 <- "
+3
+1
+2
 "
 
-comp_plot + haz_plot + table_plot + haz_spline_plot +
-  plot_layout(design = design,
+comp_plot + haz_plot + table_plot +
+  plot_layout(design = design2,
               guides = "collect",
-              heights = c(0.5, 0.5, 1.5),
-              widths = c(2.5, 3)) &
-  theme(legend.position = "bottom")
+              heights = c(0.3, 1, 0.6)) &
+  theme(legend.position = "bottom",
+        legend.nrow = 2,
+        legend.box = "vertical")
 
 ggsave(
-  filename = here("figs", "markov-property.png"),
-  width = 8,
+  filename = here("figs", "markov-property-slides.png"),
+  width = 4,
   height = 7,
   units = "in",
   dpi = 300
@@ -561,38 +555,151 @@ str_prev_plot <- ggplot(hx_sev_prev,
         legend.spacing.y = unit(0.1, 'cm'),
         legend.title = element_blank())
 
-design2 <- "
-11
-23
+# design2 <- "
+# 11
+# 23
+# "
+# 
+# str_pmat_plot + str_soj_plot + str_prev_plot +
+#   plot_layout(design = design2)
+# 
+# ggsave(
+#   filename = here("figs", "markov-property-structure-effects.png"),
+#   width = 8,
+#   height = 6,
+#   units = "in",
+#   dpi = 300
+# )
+
+```
+
+```{r}
+
+hx_sev_sub <- hx_sev_pmats %>%
+  dplyr::filter(from_type == "Moderate") %>%
+  dplyr::filter(to_type != "Moderate") %>%
+  mutate(legend_lbl = case_when(
+    model_structure == "base_model" ~ "Base Model",
+    model_structure == "hx_sev" & statename == "M" ~ "History of Severe; from M",
+    model_structure == "hx_sev" & statename == "MS" ~ "History of Severe; from MS"
+  ))
+
+hx_sev_plot <- ggplot(hx_sev_sub,
+       aes(x = t_value, 
+           color = legend_lbl)) +
+  geom_line(aes(y = estimate, linetype = legend_lbl), 
+            linewidth = 1, alpha = 0.7) +
+  geom_point(aes(y = estimate), size = 1, alpha = 0.7, position = position_dodge(width = 0.8)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                alpha = 0.7, position = position_dodge(width = 0.4), width = 3,
+                show.legend = FALSE) +
+  scale_y_continuous(limits = c(0, 1), name = "Probability") +
+  scale_x_continuous(name = "Time (days)") +
+  scale_linetype_manual(breaks = c("Base Model", "History of Severe; from M", "History of Severe; from MS"),
+                        values = c("solid", "solid", "dotdash")) +
+  scale_color_manual(breaks = c("Base Model", "History of Severe; from M", "History of Severe; from MS"),
+                     values = c("black", "grey50", "grey50")) +
+  facet_wrap(~to_type,
+             labeller = labeller(to_type = function(x) paste0("To state: ", x))) +
+  theme_minimal() +
+  theme(plot.title = element_blank(),
+        legend.position = "inside",
+        legend.position.inside = c(0.32, 0.75),
+        legend.background = element_rect(fill = alpha('white', 0.6), color = NA),
+        # legend.position = "bottom",
+        legend.box = "horizontal",
+        legend.margin = margin(),
+        legend.spacing.y = unit(0.1, 'cm'),
+        legend.title = element_blank())
+
+hx_sev_plot
+
+```
+
+```{r}
+#| label: final-patchwork-plot
+
+design <- "
+13
+24
 "
 
-str_pmat_plot + str_soj_plot + str_prev_plot +
-  plot_layout(design = design2)
+hx_sev_plot + comp_plot + 
+  haz_plot + haz_spline_plot +
+  plot_layout(design = design,
+              heights = c(1, 2),
+              widths = c(2.5, 3)) +
+  plot_annotation(tag_levels = "A")
 
 ggsave(
-  filename = here("figs", "markov-property-structure-effects.png"),
+  filename = here("figs", "markov-property-final.png"),
   width = 8,
-  height = 6,
+  height = 7,
   units = "in",
-  dpi = 300
+  dpi = 300,
+  bg = "white"
 )
 
 ```
-=======
-base_comp_temp <- base_comp$model_summary %>%
-      mutate(base_variables = unlist(base_variables)) %>%
-      dplyr::select(intersection)
 
-markov_comp_temp <- markov_comp$model_summary %>%
-  mutate(base_variables = unlist(base_variables)) %>%
-  dplyr::select(intersection)
 
-all_comp <- base_comp_temp %>%
-  rbind(markov_comp_temp)
+```{r final-patchwork}
 
+library(cowplot)
+
+design <- "
+13
+24
+"
+
+# Create plots without legends
+hx_sev_plot_no_leg <- hx_sev_plot + theme(legend.position = "none")
+comp_plot_no_leg <- comp_plot + theme(legend.position = "none")
+haz_plot_no_leg <- haz_plot + theme(legend.position = "none")
+haz_spline_plot_no_leg <- haz_spline_plot + theme(legend.position = "none")
+
+# Create the main plot without legends
+main_plot <- hx_sev_plot_no_leg + comp_plot_no_leg + 
+  haz_plot_no_leg + haz_spline_plot_no_leg +
+  plot_layout(design = design,
+              heights = c(1, 2),
+              widths = c(2.5, 3))
+
+# Extract individual legends
+legend_color <- get_legend(hx_sev_plot + 
+                                guides(linetype = "none") + theme(legend.position = "bottom"))
+legend_linetype <- get_legend(hx_sev_plot + 
+                                guides(color = "none") + 
+                                theme(legend.position = "bottom"))
+legend_shape <- get_legend(comp_plot + theme(legend.position = "bottom"))
+legend_fill <- get_legend(haz_plot + theme(legend.position = "bottom"))
+
+# Arrange legends in 2x2 grid
+legend_grid <- plot_grid(
+  legend_color, legend_shape,
+  legend_linetype, legend_fill,
+  ncol = 2,
+  nrow = 2
+)
+
+# Combine main plot with legend grid
+final_plot <- plot_grid(
+  main_plot,
+  legend_grid,
+  ncol = 1,
+  rel_heights = c(10, 1)  # Adjust this ratio as needed
+)
+
+final_plot
+
+ggsave(
+  filename = here("figs", "markov-property-final.png"),
+  width = 8,
+  height = 7,
+  units = "in",
+  dpi = 300,
+  bg = "white"
+)
 
 ```
 
-
-
->>>>>>> 3788413df3b30f7031da107ca1f12a1e007217e0

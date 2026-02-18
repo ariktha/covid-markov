@@ -294,7 +294,7 @@ age_hist <- ggplot(base_dat, aes(x = age)) +
   geom_histogram(binwidth = 5, fill = "grey80", color = "black", alpha = 0.7) +
   geom_vline(xintercept = mean_age, linetype = "dotted") +
   xlim(c(0, 105)) +
-  labs(x = "", y = "count") +
+  labs(x = "Age (years)", y = "count") +
   theme_minimal() +
   theme(plot.margin = margin(t = 5, r = 5, b = 0, l = 5, unit = "pt"))
 
@@ -431,7 +431,7 @@ age_hazards_plot <- age_hazards %>%
   ungroup()
 
 age_hr <- ggplot(subset(age_hazards_plot, constraint_type == "transition_specific"), 
-       aes(color = covariate_term)) +
+       aes(color = covariate_term, shape = covariate_term)) +
   geom_errorbar(aes(xmin = hr_lower_clipped, xmax = hr_upper_clipped, y = transition), 
                 position = pd, width = 0.2) +
   geom_point(aes(x = hazard_ratio_plot, y = transition), 
@@ -461,9 +461,15 @@ age_hr <- ggplot(subset(age_hazards_plot, constraint_type == "transition_specifi
                      labels = age_quintile_colors$model_label
                      ) +
   scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0), guide = "none") +
-  labs(x = "Hazard Ratio (log scale)", y = "Transition", color = NULL) +
+  scale_shape_manual(breaks = age_quintile_colors$model_term,
+                     values = c(18, rep(20, 4)),
+                     labels = age_quintile_colors$model_label
+                     ) +
+  labs(x = "Hazard Ratio (log scale)", y = "Transition", color = NULL, shape = NULL) +
   theme_minimal() +
-  theme(legend.position = "bottom")
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(nrow = 2),
+         shape = guide_legend(nrow = 2))
 
 age_hr
 
@@ -504,7 +510,7 @@ age_hazards_long <- age_hazards_spline %>%
                              ordered = TRUE))
 
 age_hr_sp <- ggplot(age_hazards_long, aes(x = covariate_value, y = hr, fill = model_type)) +
-  geom_line(aes(color = model_type), show.legend = FALSE) +
+  geom_line(aes(color = model_type)) +
   geom_ribbon(aes(ymin = hr_lower, ymax = hr_upper), alpha = 0.2, color = NA) +
   geom_hline(yintercept = 1, linetype = "dashed") +
   # geom_hline(aes(yintercept = )) +
@@ -517,9 +523,11 @@ age_hr_sp <- ggplot(age_hazards_long, aes(x = covariate_value, y = hr, fill = mo
                      name = "Model type") +
   labs(x = "Age (years)", y = "Hazard Ratio (log scale)") +
   theme_minimal() +
-  guides(color = "none", fill = "none") +
-  theme(plot.margin = margin(t = 0, r = 1, b = 0, l = 1, unit = "pt"))
+  # guides(color = "none") +
+  theme(plot.margin = margin(t = 0, r = 1, b = 0, l = 1, unit = "pt"),
+        legend.position = "bottom")
 
+age_hr_sp
 
 ```
 
@@ -539,37 +547,67 @@ age_combined1 <- age_hist + age_boxplot + age_hr + age_logl +
 
 age_combined1
 
-ggsave(here("figs", "age_combined1.png"), age_combined, width = 8, height = 8)
+ggsave(here("figs", "age_combined1.png"), age_combined1, width = 8, height = 8)
 
 design2 <- "
-14
-34
+12
 32
+34
 "
 
-age_combined2 <- age_hist + age_hr + age_logl_nc + age_hr_sp +
-  plot_layout(heights = c(2, 1, 4), design = design2, guides = "collect") &
-  theme(legend.position = "bottom") &
-  guides(color = guide_legend(nrow = 2))
+age_combined2 <- age_hist + age_logl_nc + age_hr_sp + age_hr +
+  plot_layout(heights = c(2, 1, 4), design = design2) +
+  plot_annotation(tag_levels = 'A')
 
 age_combined2
 
-ggsave(here("figs", "age_combined2.png"), age_combined2, width = 8, height = 8)
+ggsave(here("figs", "age_combined2.png"), age_combined2, width = 9, height = 8)
 
 ```
 
 ```{r}
 #| label: tx-history-timeline
 
+pt_stg <- pt_stg %>% distinct()
+
+rem_pt <- pt_stg %>%
+  dplyr::filter(model == "base_model") %>%
+  mutate(COVID_tx = as.character(COVID_tx)) %>%
+  dplyr::filter(grepl("Remdesivir", COVID_tx)) %>%
+  pull(deid_enc_id) %>%
+  unique()
+
+cort_pt <- pt_stg %>%
+  dplyr::filter(model == "base_model") %>%
+  mutate(COVID_tx = as.character(COVID_tx)) %>%
+  dplyr::filter(grepl("Corticosteroid", COVID_tx)) %>%
+  pull(deid_enc_id) %>%
+  unique()
+
 cov_tx_plot_dat <- pt_stg %>%
   dplyr::filter(model == "base_model") %>%
+  # dplyr::filter(!deid_enc_id %in% rem_pt) %>%
   arrange(LOS, deid_enc_id, DaysSinceEntry) %>%
   mutate(deid_enc_id = factor(deid_enc_id, levels = unique(deid_enc_id))) %>%
   mutate(COVID_tx = case_when(
-    COVID_tx %in% c("No Treatment", "Monoclonal Antibody") ~ "No Treatment",
+    COVID_tx %in% c("No Treatment", "Monoclonal Antibody", "Remdesivir only") ~ "No Corticosteroids",
+    COVID_tx %in% c("Remdesivir + Corticosteroid") ~ "Corticosteroids",
     TRUE ~ as.character(COVID_tx)
   ) %>% factor()) %>%
-  mutate(COVID_tx = relevel(COVID_tx, ref = "No Treatment"))
+  mutate(COVID_tx = relevel(COVID_tx, ref = "No Corticosteroids"))
+
+sort_list <- cov_tx_plot_dat %>%
+  dplyr::select(deid_enc_id, DaysSinceEntry) %>%
+  group_by(deid_enc_id) %>%
+  dplyr::summarize(total_days = max(DaysSinceEntry, na.rm = TRUE), .groups = "drop") %>%
+  arrange(total_days) %>%
+  pull(deid_enc_id)
+
+temp <- cov_tx_plot_dat %>%
+  dplyr::select(deid_enc_id, DaysSinceEntry, COVID_tx)
+
+cov_tx_plot_dat <- cov_tx_plot_dat %>%
+  mutate(deid_enc_id = factor(deid_enc_id, levels = sort_list))
 
 cov_tx_plot_dat %>% 
   dplyr::select(deid_enc_id, date, COVID_tx) %>%
@@ -582,15 +620,10 @@ cov_tx_plot_dat %>%
 cov_tx_plot_dat %>% 
   dplyr::select(deid_enc_id, COVID_tx) %>%
   mutate(COVID_tx = as.character(COVID_tx)) %>%
-  dplyr::filter(COVID_tx != "No Treatment") %>%
+  dplyr::filter(COVID_tx != "No Corticosteroids") %>%
   distinct() %>%
   group_by(COVID_tx) %>%
-  dplyr::summarize(n = n()) %>%
-  kable(col.names = c("Treatment", "# unique pts"),
-        caption = "Number of unique patient encounters with at least 1 day of treatment") %>%
-  kable_styling()
-
-pal <- viridis::viridis(3, option = "D")
+  dplyr::summarize(n = n())
 
 # Create your summary table as a data frame
 table_data <- cov_tx_plot_dat %>% 
@@ -604,24 +637,23 @@ table_grob <- tableGrob(table_data, rows = NULL,
                         theme = ttheme_minimal(base_size = 10))
 
 # Add caption
-title <- textGrob("Number of patient-days on treatment", 
-                  gp = gpar(fontsize = 11, fontface = "bold"))
-table_grob <- gtable::gtable_add_rows(table_grob, 
-                                      heights = grobHeight(title) + unit(5, "mm"),
-                                      pos = 0)
-table_grob <- gtable::gtable_add_grob(table_grob, title, 
-                                      t = 1, l = 1, r = ncol(table_grob))
+# title <- textGrob("Number of patient-days on treatment", 
+#                   gp = gpar(fontsize = 11, fontface = "bold"))
+# table_grob <- gtable::gtable_add_rows(table_grob, 
+#                                       heights = grobHeight(title) + unit(5, "mm"),
+#                                       pos = 0)
+# table_grob <- gtable::gtable_add_grob(table_grob, title, 
+#                                       t = 1, l = 1, r = ncol(table_grob))
 
-# Your ggplot
-pal <- viridis::viridis(3, option = "D")
+pal <- c("grey40", "#4F9300")
+
 p <- ggplot(cov_tx_plot_dat, aes(x = DaysSinceEntry, y = deid_enc_id, 
                                   fill = COVID_tx)) +
   geom_tile() +
   labs(x = "Days Since Entry") +
   theme_minimal() +
-  scale_fill_manual(breaks = c("No Treatment", "Corticosteroids", 
-                               "Remdesivir only", "Remdesivir + Corticosteroid"),
-                    values = c("grey70", pal)) +
+  scale_fill_manual(breaks = c("No Corticosteroids", "Corticosteroids"),
+                    values = c(pal)) +
   xlim(0, 21) +
   theme(axis.text.y = element_blank(),
         axis.ticks.y = element_blank(),
@@ -632,8 +664,10 @@ p <- ggplot(cov_tx_plot_dat, aes(x = DaysSinceEntry, y = deid_enc_id,
 
 # Combine with patchwork
 cov_tx_dist <- p + inset_element(table_grob, 
-                  left = 0.55, bottom = 0.05, 
-                  right = 0.97, top = 0.5)
+                  left = 0.5, bottom = 0.15, 
+                  right = 0.95, top = 0.45)
+
+cov_tx_dist
 
 ```
 
@@ -663,7 +697,7 @@ cov_tx_hr <- tidy_msm_hazards(cov_tx_mod)
 
 # Define plot limits
 x_min <- 0
-x_max <- 6
+x_max <- 3
 
 # Flag which error bars exceed limits and clip them
 cov_tx_hr_plot <- cov_tx_hr %>%
@@ -687,7 +721,8 @@ cov_tx_hr <- ggplot(cov_tx_hr_plot, aes(y = transition, x = hazard_ratio, color 
   geom_pointrange(
     aes(xmin = hr_lower_clipped, xmax = hr_upper_clipped),
     position = pd,
-    show.legend = FALSE
+    show.legend = FALSE,
+    color = pal[2]
   ) +
   geom_segment(
     data = cov_tx_hr_plot,
@@ -696,7 +731,8 @@ cov_tx_hr <- ggplot(cov_tx_hr_plot, aes(y = transition, x = hazard_ratio, color 
         alpha = upper_clip),
     arrow = arrow(length = unit(0.15, "cm"), type = "closed"),
     position = pd,
-    show.legend = FALSE
+    show.legend = FALSE,
+    color = pal[2]
   ) +
   geom_segment(
     data = cov_tx_hr_plot,
@@ -707,25 +743,25 @@ cov_tx_hr <- ggplot(cov_tx_hr_plot, aes(y = transition, x = hazard_ratio, color 
         alpha = lower_clip),
     arrow = arrow(length = unit(0.15, "cm"), type = "closed"),
     position = pd,
-    show.legend = FALSE
+    show.legend = FALSE,
+    color = pal[2]
   ) +
   geom_vline(xintercept = 1, linetype = "dashed") +
   labs(y = "Transition", x = "Hazard Ratio (95% CI)") +
   theme_minimal() +
-  theme(legend.title = element_blank(),
-        legend.position = "bottom") +
-  scale_color_manual(labels = c("No Treatment", "Corticosteroids", 
-                               "Remdesivir only", "Remdesivir + Corticosteroid"),
-                     breaks = c("COVID_txNo Treatment", "COVID_txCorticosteroids", 
-                                "COVID_txRemdesivir only", "COVID_txRemdesivir + Corticosteroid"),
-                    values = c("grey70", pal)) +
-  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0), guide = "none") +
   xlim(c(x_min, x_max)) +
-  guides(color = guide_legend(override.aes = list(shape = 15, size = 4, alpha = 1)))
+  guides(color = "none")
 
-cov_tx_combined <- cov_tx_dist / cov_tx_hr + plot_layout(heights = c(2, 1))
+cov_tx_combined <- cov_tx_dist + cov_tx_hr + plot_layout(widths = c(2.5, 1))
 
-ggsave(here("figs", "cov_tx_combined.png"), cov_tx_combined, width = 8, height = 8)
+cov_tx_combined
+
+ggsave(here("figs", "cov_tx_combined.png"), cov_tx_combined, width = 8, height = 5)
+
+```
+
+
+```{r cov-tx-hrs-slides}
 
 ggplot(cov_tx_hr_plot, aes(x = transition, y = hazard_ratio, color = covariate_term, group = covariate_term)) +
   geom_point(alpha = 0) +
