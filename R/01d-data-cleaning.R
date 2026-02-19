@@ -1,4 +1,5 @@
 library(here)
+library(tidyverse)
 
 rm(list = ls())
 
@@ -36,6 +37,8 @@ dem <- demographics_and_event_table %>%
   mutate(across(c(sex, bmi_cat, language, race, ethnicity, smoking, insurance_type, end_in_death), as.factor)) %>%
   mutate(across(c(age, LOS, BMI), as.numeric))
 
+colSums(is.na(dem))
+
 age_quintiles <- quantile(dem$age, probs = seq(0, 1, 0.2))
 
 dem <- dem %>%
@@ -52,40 +55,38 @@ dem <- dem %>%
 
 ## COVID treatment and vaccination ----------------------------------------
 
+# Read list of meds that count as corticosteroids
+# List is from Daniel over email on 18 Feb 2026
+
+corticosteroids <- read_csv(here("data", "corticosteroids.csv"))
+
 # Use `med_admin_table` to create a table of COVID treatment
 
-cov_tx <- med_admin_table %>% dplyr::select(deid_enc_id, taken_time, name, COVID_tx_flag, mar_action) %>%
-  dplyr::filter(COVID_tx_flag == "Yes" & grepl("Given", mar_action)) %>%
-  mutate(date = date_fn(taken_time)) %>% 
-  mutate(COVID_tx_name = case_when(grepl("PLACEBO", name, fixed = TRUE) ~ NA,
-                                   grepl("REMDESIVIR", name, fixed = TRUE) ~ "Remdesivir",
-                                   grepl("PREDNISONE", name, fixed = TRUE) ~ "Prednisone",
-                                   grepl("METHYLPREDNISOLONE", name, fixed = TRUE) ~ "Methylprednisolone",
-                                   grepl("DEXAMETHASONE", name, fixed = TRUE) ~ "Dexamethasone",
-                                   grepl("BAMLANIVIMAB", name, fixed = TRUE) ~ "Bamlanvimab",
-                                   TRUE ~ NA)) %>% 
-  dplyr::select(deid_enc_id, date, COVID_tx_name) %>% 
-  mutate(COVID_tx_type = case_when(COVID_tx_name %in% c("Remdesivir") ~ "Remdesivir",
-                                         COVID_tx_name %in% c("Prednisone", "Methylprednisolone", "Dexamethasone") ~ "Corticosteroids",
-                                         COVID_tx_name %in% c("Bamlanvimab") ~ "Monoclonal Antibody",
-                                         TRUE ~ NA)) %>%
-  distinct() %>% 
-  drop_na() %>%
-  group_by(deid_enc_id, date) %>% 
-  mutate(n = n(), 
-         med = paste(list(COVID_tx_type))) %>% 
-  ungroup() %>%
-  mutate(COVID_tx = case_when(
-    med %in% c("Corticosteroids", "c(\"Corticosteroids\", \"Corticosteroids\")") ~ "Corticosteroids",
-    med %in% c("c(\"Remdesivir\", \"Corticosteroids\")", "c(\"Corticosteroids\", \"Remdesivir\")") ~ "Remdesivir + Corticosteroid",
-    grepl("Monoclonal Antibody", med, fixed = TRUE) ~ "Monoclonal Antibody",
-    med == "Remdesivir" ~ "Remdesivir only",
-    TRUE ~ NA)) %>%
-  dplyr::select(-med)
+tx_steroids <- med_admin_table %>% 
+  dplyr::filter(name %in% corticosteroids$meds & mar_action %in% c("Given", "New Bag")) %>%
+  mutate(date = date_fn(taken_time),
+         corticosteroids = TRUE) %>%
+  dplyr::select(deid_enc_id, date, corticosteroids) %>%
+  distinct()
+
+tx_remdesivir <- med_admin_table %>% 
+  dplyr::filter(grepl("REMDESIVIR", name, fixed = TRUE) & mar_action %in% c("Given", "New Bag")) %>%
+  mutate(date = date_fn(taken_time),
+         remdesivir = TRUE) %>%
+  dplyr::select(deid_enc_id, date, remdesivir) %>%
+  distinct()
+
+cov_tx <- full_join(tx_steroids, tx_remdesivir, by = c("deid_enc_id", "date")) %>%
+  replace_na(list(corticosteroids = FALSE, remdesivir = FALSE)) %>%
+  mutate(COVID_tx = case_when(corticosteroids & remdesivir ~ "Both",
+                              corticosteroids & !remdesivir ~ "Corticosteroids Only",
+                              !corticosteroids & remdesivir ~ "Remdesivir Only",
+                              TRUE ~ "No Treatment")) %>%
+  dplyr::select(deid_enc_id, date, COVID_tx)
+
+table(cov_tx$COVID_tx)
 
 saveRDS(cov_tx, here("data", "pt_covid_tx.rds"))
-
-cov_tx <- cov_tx %>% dplyr::select(deid_enc_id, date, COVID_tx)
 
 # Use `covid_vaccinations` to create a table of COVID vaccination status
 
@@ -117,7 +118,7 @@ comorb <- comorb %>% dplyr::select(deid_enc_id, cci_score, cci_fct, chf, cpd) %>
   mutate(across(c(chf, cpd), as.factor)) %>%
   mutate(cci_cat = case_when(cci_score == 0 ~ "None",
                              cci_score %in% 1:2 ~ "Mild",
-                             cci_score %in% 3:5 ~ "Moderate/Severe",
+                             cci_score %in% 3:7 ~ "Moderate/Severe",
                              TRUE ~ as.character(NA))) %>%
   mutate(cci_cat = factor(cci_cat, levels = c("None", "Mild", "Moderate/Severe"), ordered = TRUE))
 
@@ -202,6 +203,13 @@ dem <- dem %>%
   replace_na(list(copd = 0, DNR = FALSE, dnr_on_admit = "No",
                   dx_covid = FALSE, cov_diag_strict = FALSE, cov_diag_medium = FALSE))
 
+colSums(is.na(dem))
+
+library(mice)
+
+mice_imputed <- mice(dem, formulas = list(BMI ~ sex + age + cci_score + race + ethnicity)) 
+dem_imp <- complete(mice_imputed)
+
 dm_cov_stg <- dm_covid_stg %>% 
   ungroup() %>%
   left_join(cov_vax, by = c("deid_enc_id", "date")) %>% 
@@ -211,6 +219,6 @@ dm_cov_stg <- dm_covid_stg %>%
   mutate(COVID_tx = factor(COVID_tx)) %>%
   mutate(COVID_tx = relevel(COVID_tx, ref = "No Treatment"))
 
-saveRDS(dem, here("data", "pt_demographics.rds"))
+saveRDS(dem_imp, here("data", "pt_demographics.rds"))
 saveRDS(dm_cov_stg, here("data", "pt_stage_data.rds"))
 saveRDS(dm_cov_summ, here("data", "pt_stage_summary.rds"))
