@@ -1,11 +1,11 @@
-library(here)
-
 ## Setup
+
+library(here)
 
 source(here("R", "00-config.R"))
 source(here("R", "00a-fns-data_preprocess.R"))
 
-# Read in data ------------------------------------------------------------
+# Read in data ----
 
 # Get a list of all .rds files in the folder
 rds_files <- list.files(
@@ -22,7 +22,7 @@ for (file in rds_files) {
   assign(paste0(var_name, "_raw"), readRDS(file), envir = .GlobalEnv)
 }
 
-# Basic data cleaning -----------------------------------------------------
+# Type conversion and basic data cleaning ----
 
 ## Assign appropriate column types
 
@@ -59,10 +59,7 @@ demographics_and_event_table <- demographics_and_event_table_raw %>%
   ) %>%
   dplyr::filter(deid_enc_id %in% encounter_ids_raw) %>%
   mutate(
-    discharge_date = case_when(
-      is.na(death_date) ~ discharge_date,
-      TRUE ~ death_date
-    ),
+    discharge_date = case_when(is.na(death_date) ~ discharge_date, TRUE ~ death_date),
     LOS = as.integer(LOS)
   )
 
@@ -75,13 +72,15 @@ med_admin_table <- med_admin_table_raw %>%
   mutate(across(c(vasopressor_flag, COVID_tx_flag), as.factor))
 
 flowsheet_data_table <- flowsheet_data_table_raw %>%
-  type_convert(na = c("", "NA", "NULL"), trim_ws = TRUE, guess_integer = TRUE)
+  type_convert(
+    na = c("", "NA", "NULL"),
+    trim_ws = TRUE,
+    guess_integer = TRUE
+  )
 
 covid_vaccinations <- covid_vaccinations_raw %>%
-  mutate(
-    immune_date = date_fn(immune_date),
-    dose_num = as.numeric(dose_num)
-  ) %>%
+  mutate(immune_date = date_fn(immune_date),
+         dose_num = as.numeric(dose_num)) %>%
   dplyr::select(-manufacturer)
 
 diag_classification <- primary_diagnoses_SB_raw %>%
@@ -96,7 +95,7 @@ colSums(is.na(med_admin_table))
 colSums(is.na(flowsheet_data_table))
 colSums(is.na(covid_vaccinations))
 
-# Assign COVID severity stage to each patient-day -------------------------
+# Assign COVID severity stage to each patient-day ----
 
 # Create `dm` table (reformat and select necessary variables from `demographics_and_event_table`)
 # A dataset where each row represent a single patient-day
@@ -104,13 +103,11 @@ colSums(is.na(covid_vaccinations))
 
 dm <- demographics_and_event_table %>%
   group_by(deid_enc_id) %>%
-  mutate(
-    day_date = list(seq(
-      from = min(admit_date),
-      to = max(discharge_date),
-      by = "day"
-    ))
-  ) %>%
+  mutate(day_date = list(seq(
+    from = min(admit_date),
+    to = max(discharge_date),
+    by = "day"
+  ))) %>%
   unnest(day_date) %>%
   relocate(day_date, .after = 2) %>%
   rename(date = day_date) %>%
@@ -122,7 +119,7 @@ dm <- demographics_and_event_table %>%
   ungroup()
 
 # Create `med` table (reformat and select necessary variables from `med_admin_table`)
-
+# Reformat medication and flowsheet data for daily aggregation
 med <- med_admin_table %>%
   mutate(
     date = as.Date(taken_time, format = "%Y-%m-%d"),
@@ -131,7 +128,7 @@ med <- med_admin_table %>%
   dplyr::select(deid_enc_id, taken_time, date, vasopressor_flag, infusion_rate)
 
 # Create `fs` table (reformat and select necessary variables from `flowsheet_data_table`)
-
+# Exclude vital signs; retain only respiratory/device-related flowsheet entries
 fs <- flowsheet_data_table %>%
   dplyr::filter(
     clinical_concept %nin%
@@ -145,7 +142,8 @@ fs <- flowsheet_data_table %>%
   ) %>%
   mutate(
     date = as.Date(recorded_time, format = "%Y-%m-%d"),
-    meas_val_chr = meas_value, # create new var `meas_val_chr` to keep meas_value as character type
+    meas_val_chr = meas_value,
+    # create new var `meas_val_chr` to keep meas_value as character type
     meas_val_num = as.numeric(meas_value)
   ) %>%
   dplyr::select(
@@ -158,6 +156,8 @@ fs <- flowsheet_data_table %>%
     clinical_concept
   )
 
+# Daily clinical indicator tables ----
+
 # Create table to indicate whether each patient received vasopressor each day
 # -   Create new variable `vp_yn` to indicate whether patient received VP at timestamp
 # -   If `vasopressor_flag`=Yes & `infusion_rate`\>0, then `vp_yn`=1
@@ -165,9 +165,9 @@ fs <- flowsheet_data_table %>%
 # -   Remove duplicate rows
 
 vp.tab <- med %>%
-  mutate(
-    vp_yn = ifelse((vasopressor_flag == "Yes" & infusion_rate > 0), 1, 0)
-  ) %>%
+  mutate(vp_yn = ifelse((
+    vasopressor_flag == "Yes" & infusion_rate > 0
+  ), 1, 0)) %>%
   group_by(deid_enc_id, date) %>%
   mutate(VP = max(vp_yn, na.rm = T)) %>%
   distinct(deid_enc_id, date, VP)
@@ -191,15 +191,15 @@ ecmo.tab <- fs %>%
 # -   Remove duplicate rows
 
 crrt.tab <- fs %>%
-  mutate(
-    crrt_yn = ifelse(
-      (clinical_concept == "HD_UF_CRRT_settings" &
+  mutate(crrt_yn = ifelse(
+    (
+      clinical_concept == "HD_UF_CRRT_settings" &
         flo_meas_name %in%
-          c("R UFR TRANSCRIBED CRRT IP_CD_UCSF", "R CRRT BLOOD FLOW RATE")),
-      1,
-      0
-    )
-  ) %>%
+        c("R UFR TRANSCRIBED CRRT IP_CD_UCSF", "R CRRT BLOOD FLOW RATE")
+    ),
+    1,
+    0
+  )) %>%
   group_by(deid_enc_id, date) %>%
   mutate(CRRT = max(crrt_yn, na.rm = T)) %>%
   distinct(deid_enc_id, date, CRRT)
@@ -226,15 +226,15 @@ niv.tab <- fs %>%
 # -   Remove duplicate rows
 
 hd.tab <- fs %>%
-  mutate(
-    hd_yn = ifelse(
-      (clinical_concept == "HD_UF_CRRT_settings" &
+  mutate(hd_yn = ifelse(
+    (
+      clinical_concept == "HD_UF_CRRT_settings" &
         flo_meas_name %in%
-          c("R HD BLOOD FLOW RATE", "R HD ULTRAFILTRATION RATE")),
-      1,
-      0
-    )
-  ) %>%
+        c("R HD BLOOD FLOW RATE", "R HD ULTRAFILTRATION RATE")
+    ),
+    1,
+    0
+  )) %>%
   group_by(deid_enc_id, date) %>%
   mutate(HD = max(hd_yn, na.rm = T)) %>%
   distinct(deid_enc_id, date, HD)
@@ -250,6 +250,8 @@ intub.tab <- fs %>%
   group_by(deid_enc_id, date) %>%
   mutate(INTUB = max(intub_yn, na.rm = T)) %>%
   distinct(deid_enc_id, date, INTUB)
+
+# SpO2/FiO2 ratio (SF ratio) ----
 
 # Filter data for SpO2 and FiO2 and merge tables to calculate SF
 # -   Filter data for SpO2 and FiO2
@@ -289,6 +291,7 @@ SF200.tab <- SF.tab %>%
   mutate(SF_LT_200 = max(sf_lt_200_yn, na.rm = T)) %>%
   distinct(deid_enc_id, date, SF_LT_200)
 
+# O2 device categorization ------
 # Assign all O2 devices to respiratory support categories
 
 # Read in `o2_dev_names.csv` which lists all O2 devices and their respective O2 support category. Categories include:
@@ -364,7 +367,8 @@ O2.tab <- fs %>%
       1,
       0
     ),
-    HighO2 = ifelse(flo_meas_name %in% O2_names & meas_val_num > 12, 1, 0)
+    HighO2 = ifelse(flo_meas_name %in% O2_names &
+                      meas_val_num > 12, 1, 0)
   ) %>%
   group_by(deid_enc_id, date) %>%
   mutate(
@@ -384,70 +388,64 @@ O2_DEV.tab <- O2.tab %>%
   left_join(device.tab, by = c("deid_enc_id", "date")) %>%
   mutate(NC_GT_12 = ifelse(NCDEV == 1 & HighO2 == 1, 1, 0))
 
+# Merge all daily indicators into patient-day dataset ----
 # Merge all tables to aggregate binary clinical scenarios and O2 device classifications
 
 bin_clin_scen_df <- dm %>%
-  left_join(fs, by = c("deid_enc_id", "date"), suffix = c("", ".dupcol")) %>%
-  left_join(
-    vp.tab,
-    by = c("deid_enc_id", "date"),
-    suffix = c("", ".dupcol")
-  ) %>%
-  left_join(
-    ecmo.tab,
-    by = c("deid_enc_id", "date"),
-    suffix = c("", ".dupcol")
-  ) %>%
-  left_join(
-    crrt.tab,
-    by = c("deid_enc_id", "date"),
-    suffix = c("", ".dupcol")
-  ) %>%
-  left_join(
-    niv.tab,
-    by = c("deid_enc_id", "date"),
-    suffix = c("", ".dupcol")
-  ) %>%
-  left_join(
-    hd.tab,
-    by = c("deid_enc_id", "date"),
-    suffix = c("", ".dupcol")
-  ) %>%
-  left_join(
-    intub.tab,
-    by = c("deid_enc_id", "date"),
-    suffix = c("", ".dupcol")
-  ) %>%
-  left_join(
-    SF200.tab,
-    by = c("deid_enc_id", "date"),
-    suffix = c("", ".dupcol")
-  ) %>%
-  left_join(
-    O2_DEV.tab,
-    by = c("deid_enc_id", "date"),
-    suffix = c("", ".dupcol")
-  ) %>%
+  left_join(fs,
+            by = c("deid_enc_id", "date"),
+            suffix = c("", ".dupcol")) %>%
+  left_join(vp.tab,
+            by = c("deid_enc_id", "date"),
+            suffix = c("", ".dupcol")) %>%
+  left_join(ecmo.tab,
+            by = c("deid_enc_id", "date"),
+            suffix = c("", ".dupcol")) %>%
+  left_join(crrt.tab,
+            by = c("deid_enc_id", "date"),
+            suffix = c("", ".dupcol")) %>%
+  left_join(niv.tab,
+            by = c("deid_enc_id", "date"),
+            suffix = c("", ".dupcol")) %>%
+  left_join(hd.tab,
+            by = c("deid_enc_id", "date"),
+            suffix = c("", ".dupcol")) %>%
+  left_join(intub.tab,
+            by = c("deid_enc_id", "date"),
+            suffix = c("", ".dupcol")) %>%
+  left_join(SF200.tab,
+            by = c("deid_enc_id", "date"),
+            suffix = c("", ".dupcol")) %>%
+  left_join(O2_DEV.tab,
+            by = c("deid_enc_id", "date"),
+            suffix = c("", ".dupcol")) %>%
   dplyr::select(-ends_with(".dupcol")) %>%
   distinct() %>%
   mutate(death = if_else(date == death_date, 1, 0, missing = NA))
 
+# Assign COVID-19 severity stage per patient-day -----
 # Get COVID stages based on patients' binary clinical scenarios and usage of O2 devices (and their respiratory support category)
+# Stages follow an ordinal severity scale (4–10), aligned with WHO severity framework:
+# 4 = no supplemental O2, 5–6 = low/high-flow O2, 7 = intubated (SF ≥ 200),
+# 8 = intubated (SF < 200) or vasopressor/CRRT, 9 = ECMO or multi-organ failure, 10 = death
 
 bin_clin_scen_df <- bin_clin_scen_df %>%
   mutate(
     stage = case_when(
       death == 1 ~ 10,
       ECMO == 1 ~ 9,
-      SF_LT_200 == 1 & (INTUB == 1 | IVDEV == 1) & (VP == 1 | CRRT == 1) ~ 9,
+      SF_LT_200 == 1 &
+        (INTUB == 1 | IVDEV == 1) & (VP == 1 | CRRT == 1) ~ 9,
       VP == 1 | CRRT == 1 ~ 8,
       SF_LT_200 == 1 & (INTUB == 1 | IVDEV == 1) ~ 8,
       SF_LT_200 == 0 & (INTUB == 1 | IVDEV == 1) ~ 7,
       (NIVDEV == 1 & CPAPDEV == 0) &
         IVDEV == 0 &
-        ((NIV_PER_DAY > NC_PER_DAY) | (NC_PER_DAY > 0 & NC_GT_12 == 1)) ~ 6,
+        ((NIV_PER_DAY > NC_PER_DAY) |
+           (NC_PER_DAY > 0 & NC_GT_12 == 1)) ~ 6,
       NC_PER_DAY > 0 & NC_GT_12 == 1 ~ 6,
-      SIMPLEDEV == 1 & (LowO2 == 1 | HighO2 == 1 | SIMPLE_PER_DAY > 1) ~ 5,
+      SIMPLEDEV == 1 &
+        (LowO2 == 1 | HighO2 == 1 | SIMPLE_PER_DAY > 1) ~ 5,
       NC_PER_DAY > 0 & NC_GT_12 == 0 ~ 5,
       LowO2 == 1 &
         SIMPLEDEV == 0 &
@@ -463,24 +461,20 @@ bin_clin_scen_df <- bin_clin_scen_df %>%
 # Clean table to just indicate the stage of COVID-19 for each patient-day
 
 bin_clin_scen_df <- bin_clin_scen_df %>%
-  relocate(
-    c("DaysSinceEntry", "DaysSincePos", "stage", "death"),
-    .after = "end_in_death"
-  ) %>%
-  dplyr::select(
-    deid_enc_id,
-    date,
-    DaysSinceEntry,
-    DaysSincePos,
-    stage,
-    death_date
-  ) %>%
+  relocate(c("DaysSinceEntry", "DaysSincePos", "stage", "death"), .after = "end_in_death") %>%
+  dplyr::select(deid_enc_id,
+                date,
+                DaysSinceEntry,
+                DaysSincePos,
+                stage,
+                death_date) %>%
   distinct() %>%
   mutate(
     DaysSinceEntry = as.numeric(DaysSinceEntry),
     DaysSincePos = as.numeric(DaysSincePos)
   )
 
+# Add recovery stage ----
 # Add stage 11 to denote "recovered" for those who leave the model before death
 
 dm_covid_stg <- bin_clin_scen_df %>%
@@ -501,6 +495,8 @@ dm_covid_stg <- bin_clin_scen_df %>%
     }
     dm_covid_stg
   })
+
+# Clean up intermediate objects and save -----
 
 rm(list = ls(pattern = "\\.tab$"))
 rm(list = ls(pattern = "\\_names$"))

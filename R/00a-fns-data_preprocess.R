@@ -1,14 +1,21 @@
-date_fn <- function(x) as.Date(as.POSIXct(x, format = "%Y-%m-%d %H:%M:%S"))
+# Utility functions used across data preprocessing scripts
 
+# Parse datetime strings to Date objects
+date_fn <- function(x)
+  as.Date(as.POSIXct(x, format = "%Y-%m-%d %H:%M:%S"))
+
+# Negation of %in%
 `%nin%` <- Negate(`%in%`)
 
-tbl_fn <- function(x){
+# Return frequency table with counts and percentages
+tbl_fn <- function(x) {
   tbl <- table(x)
-  res <- cbind(tbl, round(prop.table(tbl)*100, 2))
+  res <- cbind(tbl, round(prop.table(tbl) * 100, 2))
   colnames(res) <- c('Count', 'Percentage')
   res
 }
 
+# Add CalendarTime column: sequential days from the earliest date in the dataset
 add_calendar_time <- function(patient_data, date_column = "Date") {
   # Check if the specified date column exists
   if (!date_column %in% names(patient_data)) {
@@ -29,27 +36,33 @@ add_calendar_time <- function(patient_data, date_column = "Date") {
   return(patient_data)
 }
 
+# Calculate crude transition rate estimates for each model using msm::crudeinits.msm
 calc_crude_init_rates <- function(patient_data, qmat_list) {
-  
   crude_results <- list()
   for (modelname in unique(patient_data$model)) {
-    
-    model_data <- patient_data[which(patient_data$model == modelname),]
+    model_data <- patient_data[which(patient_data$model == modelname), ]
     qmat <- qmat_list[[modelname]]
     
     crude_result <- tryCatch({
-      crudeinits.msm(state_num ~ DaysSinceEntry, subject = deid_enc_id, data = model_data, qmatrix = qmat)
+      crudeinits.msm(
+        state_num ~ DaysSinceEntry,
+        subject = deid_enc_id,
+        data = model_data,
+        qmatrix = qmat
+      )
     }, error = function(e) {
-      warning(paste("Error calculating crude rates for", modelname, ":", e$message))
+      warning(paste(
+        "Error calculating crude rates for",
+        modelname,
+        ":",
+        e$message
+      ))
       return(NULL)
     })
     
     # Save the crude rates and the model name
     if (!is.null(crude_result)) {
-      crude_results[[modelname]] <- list(
-        qmat = crude_result,
-        modelname = modelname
-      )
+      crude_results[[modelname]] <- list(qmat = crude_result, modelname = modelname)
     }
   }
   

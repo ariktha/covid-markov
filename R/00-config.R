@@ -2,23 +2,27 @@ rm(list = ls())
 
 # Load packages -----------------------------------------------------------
 
-library(tidyverse)
 library(here)
+library(R.utils)
+
+library(tidyverse)
 library(broom)
 library(data.table)
-library(msm)
-library(parallel)
-library(naniar)
 library(purrr)
-library(glue)
-library(splines)
 library(stringr)
+library(naniar)
+library(glue)
+
+library(msm)
+library(splines)
+
+library(parallel)
 library(future)
 library(future.apply)
-library(R.utils)
+
 library(patchwork)
 
-# Set options and parameters -----------------------------------------------
+# Set global options ----------------------------------------------
 
 options(readr.show_col_types = FALSE)
 
@@ -27,25 +31,54 @@ n.cores = 6
 
 time_vec <- c(1, 7, 15, 30)
 
-# Covariate specifications
+# Covariates ------
 
 continuous_covariates <- c("age", "cci_score", "BMI")
 
-key_covariates <- c("age", "age_cat", "sex", "race", "ethnicity", "language", 
-                    "insurance_type", "smoking", "BMI", "bmi_cat", 
-                    "vax", "cci_score", "chf", "cci_cat", 
-                    "copd", "dnr_on_admit", "COVID_tx")
+key_covariates <- c(
+  "age",
+  "age_cat",
+  "sex",
+  "race",
+  "ethnicity",
+  "language",
+  "insurance_type",
+  "smoking",
+  "BMI",
+  "bmi_cat",
+  "vax",
+  "cci_score",
+  "chf",
+  "cci_cat",
+  "copd",
+  "dnr_on_admit",
+  "COVID_tx"
+)
 
-key_covariates_labels <- c("Age", "Age category", "Sex", "Race", "Ethnicity", "Language", 
-                           "Insurance type", "Smoking status", "BMI", "BMI category", 
-                           "COVID-19 vaccination", "Charlson comorbidity index", "CHF", "CCI category", 
-                           "COPD", "DNR on admission", "COVID-19 treatment")
+key_covariates_labels <- c(
+  "Age",
+  "Age category",
+  "Sex",
+  "Race",
+  "Ethnicity",
+  "Language",
+  "Insurance type",
+  "Smoking status",
+  "BMI",
+  "BMI category",
+  "COVID-19 vaccination",
+  "Charlson comorbidity index",
+  "CHF",
+  "CCI category",
+  "COPD",
+  "DNR on admission",
+  "COVID-19 treatment"
+)
 
-# Sections to run ----------------------------------------------------------
+# Analysis sections -------------------------------------------------------
+# Toggle flags to control which analyses are run
 
 run_data_setup <- TRUE
-
-
 
 do_no_cov <- FALSE
 fit_no_cov_models <- TRUE
@@ -65,7 +98,7 @@ fit_univar_models <- TRUE
 refit_failed_univar_models <- TRUE
 comp_univar_models <- TRUE
 
-# Not implemented
+## Not implemented yet -----
 do_multivar <- FALSE
 fit_multivar_models <- TRUE
 comp_multivar_models <- TRUE
@@ -86,34 +119,28 @@ run_long_stay_analysis <- TRUE
 
 # Config for results compilation --------------------------------
 
-config_core <- list(
-  comparison = list(include_across = FALSE)
-)
+config_core <- list(comparison = list(include_across = FALSE))
 
-# Transition types and colors ------------
+# Transition type labels and plot colors ------------
 
-trend_types <- cross_join(
-  tibble(from = c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2")),
-  tibble(to = c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2", "R", "D"))
-) %>%
-  mutate(
-    from_type = substring(from, 1, 1),
-    to_type = substring(to, 1, 1)
-  ) %>%
+trend_types <- cross_join(tibble(from = c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2")), tibble(to = c(
+  "M", "M1", "M2", "M3", "MS", "S", "S1", "S2", "R", "D"
+))) %>%
+  mutate(from_type = substring(from, 1, 1), to_type = substring(to, 1, 1)) %>%
   mutate(
     trend = case_when(
       from == to ~ "Self-transition",
       to == "R" ~ "Recovery",
       to == "D" ~ "Death",
-      from_type == "M" & to_type == "M" & 
+      from_type == "M" & to_type == "M" &
         as.numeric(sub("M", "", to)) > as.numeric(sub("M", "", from)) ~ "Worse",
-      from_type == "M" & to_type == "M" & 
+      from_type == "M" & to_type == "M" &
         as.numeric(sub("M", "", to)) < as.numeric(sub("M", "", from)) ~ "Better",
       from_type == "M" & to_type == "S" ~ "Worse",
       from_type == "S" & to_type == "M" ~ "Better",
-      from_type == "S" & to_type == "S" & 
+      from_type == "S" & to_type == "S" &
         as.numeric(sub("S", "", to)) > as.numeric(sub("S", "", from)) ~ "Worse",
-      from_type == "S" & to_type == "S" & 
+      from_type == "S" & to_type == "S" &
         as.numeric(sub("S", "", to)) < as.numeric(sub("S", "", from)) ~ "Better",
       from_type == "M" & to == "MS" ~ "Other",
       from == "MS" & to_type == "M" ~ "Other",
@@ -138,6 +165,7 @@ state_colors <- tibble(
   color = c("#3484A5FF", "#403872FF", "#0B0405FF", "#60CEACFF")
 )
 
+# Ordering and model lookup -----------------------------------------------
 
 stage_order <- c("4", "5", "6", "7", "8", "9", "10", "11")
 state_order <- c("M", "M1", "M2", "M3", "MS", "S", "S1", "S2", "D", "R")
@@ -151,15 +179,4 @@ models <- c(
   "sev_2" = "2 severe states"
 )
 
-# model_colors <- c(
-#   "black",
-#   
-# )
-
-
-
-models_df <- tibble(
-  model = names(models),
-  model_name = models
-)
-
+models_df <- tibble(model = names(models), model_name = models)

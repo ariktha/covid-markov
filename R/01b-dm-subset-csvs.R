@@ -1,27 +1,35 @@
+# Setup -----
 library(here)
-
-## Setup
 
 source(here("R", "00-config.R"))
 
-## Read encounter ids and patient ids
+# Load cohort IDs -----
 
 enc_ids <- readRDS(here("data", "preprocess", "encounter_ids.rds"))
 pat_ids <- readRDS(here("data", "preprocess", "patient_ids.rds"))
 
-# Reading and saving data from the files that are specific to patients or encounters
+# Subset raw CSVs to cohort ----
+
+# Each raw file is filtered to the study cohort using patient or encounter IDs,
+# then saved as an RDS file for faster subsequent loading.
+# Files are filtered on patient ID where available, encounter ID otherwise.
 
 # Define the file paths and filtering parameters
-file_paths <- list.files(here("data", "raw"), pattern = "*.csv", full.names = TRUE) 
-primary_filter_column <- "deid_pat_id"  
+file_paths <- list.files(here("data", "raw"),
+                         pattern = "*.csv",
+                         full.names = TRUE)
+primary_filter_column <- "deid_pat_id"
 primary_filter_values <- pat_ids
 
-secondary_filter_column <- "deid_enc_id"  
+secondary_filter_column <- "deid_enc_id"
 secondary_filter_values <- enc_ids
 
 # Function to filter a file
-filter_file <- function(file_path, primary_filter_column, primary_filter_values, 
-                        secondary_filter_column, secondary_filter_values) {
+filter_file <- function(file_path,
+                        primary_filter_column,
+                        primary_filter_values,
+                        secondary_filter_column,
+                        secondary_filter_values) {
   message("Processing file: ", file_path)  # Log progress
   
   # Read the file with pipe as the delimiter
@@ -29,8 +37,10 @@ filter_file <- function(file_path, primary_filter_column, primary_filter_values,
     fread(
       file_path,
       sep = "|",
-      fill = TRUE,            # Fill missing fields with NA
-      quote = "",             # Disable quote handling
+      fill = TRUE,
+      # Fill missing fields with NA
+      quote = "",
+      # Disable quote handling
       showProgress = TRUE     # Could suppress progress bar for cleaner output
     )
   }, error = function(e) {
@@ -38,7 +48,8 @@ filter_file <- function(file_path, primary_filter_column, primary_filter_values,
     return(NULL)
   })
   
-  if (is.null(full_data)) return(NULL)  # Skip file if read failed
+  if (is.null(full_data))
+    return(NULL)  # Skip file if read failed
   
   # Determine which filter column to use
   if (primary_filter_column %in% colnames(full_data)) {
@@ -62,9 +73,11 @@ filter_file <- function(file_path, primary_filter_column, primary_filter_values,
 filtered_files <- lapply(file_paths, function(file) {
   tryCatch(
     filter_file(
-      file, 
-      primary_filter_column, primary_filter_values, 
-      secondary_filter_column, secondary_filter_values
+      file,
+      primary_filter_column,
+      primary_filter_values,
+      secondary_filter_column,
+      secondary_filter_values
     ),
     error = function(e) {
       message("Error processing file: ", file, "\n", e)
@@ -75,6 +88,8 @@ filtered_files <- lapply(file_paths, function(file) {
 
 # Assign names to the list based on the file names
 names(filtered_files) <- basename(file_paths)
+
+# Save filtered datasets as RDS files -----
 
 # Save each filtered dataset to its own RDS file
 output_dir <- here("data", "preprocess")
@@ -102,5 +117,5 @@ o2_dev_names <- read_csv(here("data", "raw", "others", "o2_dev_names.csv"))
 diagnosis_classification <- read_csv(here("data", "raw", "others", "primary_diagnoses_SB.csv"))
 
 saveRDS(o2_dev_names, here("data", "preprocess", "o2_dev_names.rds"))
-saveRDS(diagnosis_classification, here("data", "preprocess", "primary_diagnoses_SB.rds"))
-
+saveRDS(diagnosis_classification,
+        here("data", "preprocess", "primary_diagnoses_SB.rds"))
