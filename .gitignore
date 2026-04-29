@@ -1,4 +1,3 @@
-
 # Ignore folders
 abstract/
 idea-dump/
@@ -7,6 +6,9 @@ figs/
 literature/
 analysis-plan/
 slide-decks/
+daniel/
+epidemics-10/
+paper-drafts/
 
 # Ignore everything starting with an underscore
 _*
@@ -16,6 +18,15 @@ _*/**
 *-int
 *-int.*
 *-int/**
+
+# Files for qmd render
+*_files/
+*_files/*
+*/Notes
+*/Notes/
+*/Notes/*
+*/images
+*/images/*
 
 # History files
 .Rhistory
