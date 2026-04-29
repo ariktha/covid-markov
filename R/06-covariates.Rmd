@@ -146,6 +146,14 @@ tab_one_enc_dat <- tab_one_dat %>%
   left_join(entry_stage, by = "deid_enc_id") %>%
   left_join(stg_days_enc, by = "deid_enc_id", relationship = "many-to-many") 
 
+temp_id <- tab_one_enc_dat %>% group_by(deid_enc_id) %>% summarise(n = n()) %>% filter(n > 1) %>% pull(deid_enc_id)
+temp_row <- tab_one_enc_dat %>% filter(deid_enc_id %in% temp_id) %>% mutate(vax = factor(1)) %>% distinct()
+
+tab_one_enc_dat <- tab_one_enc_dat %>%
+  filter(!deid_enc_id %in% temp_id) %>%
+  bind_rows(temp_row) %>%
+  distinct()
+
 for(var in tab_one_enc_vars) {
   if(var %in% names(tab_one_enc_dat)) {
     label(tab_one_enc_dat[[var]]) <- tab_one_enc_var_labels[[var]]
@@ -478,6 +486,26 @@ age_hr
 ```{r}
 #| label: age-hrs-spline
 
+age_support_dat <- pt_stg %>%
+  dplyr::filter(model == "base_model") %>%
+  dplyr::select(deid_enc_id, DaysSinceEntry, age, state) %>%
+  distinct() %>%
+  arrange(deid_enc_id, DaysSinceEntry) %>%
+  group_by(deid_enc_id) %>%
+  mutate(
+    from_state = lag(state),
+    to_state   = state
+  ) %>%
+  ungroup() %>%
+  dplyr::filter(!is.na(from_state)) %>%   # removes first row per person
+  dplyr::select(deid_enc_id, age, DaysSinceEntry, from_state, to_state) %>%
+  dplyr::filter(from_state != to_state) %>%
+  mutate(transition = paste(from_state, "->", to_state)) %>%
+  mutate(transition = factor(transition,
+                             levels = c("M -> S", "S -> M", "M -> D",
+                                        "S -> D", "M -> R", "S -> R"),
+                             ordered = TRUE))
+
 age_hazards_spline <- extract_spline_hazard_ratios(
   list(base_model_age_spline = univar_models$base_model_age_spline),
   spline_var = "age",
@@ -509,10 +537,22 @@ age_hazards_long <- age_hazards_spline %>%
                                         "S -> D", "M -> R", "S -> R"),
                              ordered = TRUE))
 
-age_hr_sp <- ggplot(age_hazards_long, aes(x = covariate_value, y = hr, fill = model_type)) +
+age_limits <- age_support_dat %>%
+  dplyr::select(age, transition) %>%
+  group_by(transition) %>%
+  dplyr::summarize(min_age = min(age, na.rm = TRUE), 
+                   max_age = max(age, na.rm = TRUE), .groups = "drop")
+
+age_hazards_long_plot <- age_hazards_long %>%
+  left_join(age_limits, by = "transition") %>%
+  dplyr::filter(covariate_value >= min_age & covariate_value <= max_age)
+
+age_hr_sp <- ggplot(age_hazards_long_plot, aes(x = covariate_value, y = hr, fill = model_type)) +
   geom_line(aes(color = model_type)) +
   geom_ribbon(aes(ymin = hr_lower, ymax = hr_upper), alpha = 0.2, color = NA) +
   geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_rug(data = age_support_dat, aes(x = age), 
+           inherit.aes = FALSE, sides = "b", alpha = 0.1) +
   # geom_hline(aes(yintercept = )) +
   geom_vline(xintercept = mean_age, linetype = "dotted") +
   facet_wrap(~ transition, nrow = 3) +
@@ -570,31 +610,10 @@ ggsave(here("figs", "age_combined2.png"), age_combined2, width = 9, height = 8)
 
 pt_stg <- pt_stg %>% distinct()
 
-rem_pt <- pt_stg %>%
-  dplyr::filter(model == "base_model") %>%
-  mutate(COVID_tx = as.character(COVID_tx)) %>%
-  dplyr::filter(grepl("Remdesivir", COVID_tx)) %>%
-  pull(deid_enc_id) %>%
-  unique()
-
-cort_pt <- pt_stg %>%
-  dplyr::filter(model == "base_model") %>%
-  mutate(COVID_tx = as.character(COVID_tx)) %>%
-  dplyr::filter(grepl("Corticosteroid", COVID_tx)) %>%
-  pull(deid_enc_id) %>%
-  unique()
-
 cov_tx_plot_dat <- pt_stg %>%
   dplyr::filter(model == "base_model") %>%
-  # dplyr::filter(!deid_enc_id %in% rem_pt) %>%
-  arrange(LOS, deid_enc_id, DaysSinceEntry) %>%
-  mutate(deid_enc_id = factor(deid_enc_id, levels = unique(deid_enc_id))) %>%
-  mutate(COVID_tx = case_when(
-    COVID_tx %in% c("No Treatment", "Monoclonal Antibody", "Remdesivir only") ~ "No Corticosteroids",
-    COVID_tx %in% c("Remdesivir + Corticosteroid") ~ "Corticosteroids",
-    TRUE ~ as.character(COVID_tx)
-  ) %>% factor()) %>%
-  mutate(COVID_tx = relevel(COVID_tx, ref = "No Corticosteroids"))
+  arrange(deid_enc_id, DaysSinceEntry) %>%
+  mutate(deid_enc_id = factor(deid_enc_id, levels = unique(deid_enc_id)))
 
 sort_list <- cov_tx_plot_dat %>%
   dplyr::select(deid_enc_id, DaysSinceEntry) %>%
@@ -603,11 +622,15 @@ sort_list <- cov_tx_plot_dat %>%
   arrange(total_days) %>%
   pull(deid_enc_id)
 
-temp <- cov_tx_plot_dat %>%
-  dplyr::select(deid_enc_id, DaysSinceEntry, COVID_tx)
 
 cov_tx_plot_dat <- cov_tx_plot_dat %>%
-  mutate(deid_enc_id = factor(deid_enc_id, levels = sort_list))
+  mutate(deid_enc_id = factor(deid_enc_id, levels = sort_list)) %>%
+  mutate(COVID_tx = factor(COVID_tx, 
+                           levels = c("No Treatment", 
+                                      "Remdesivir Only", 
+                                      "Corticosteroids Only", 
+                                      "Both"),
+                           ordered = FALSE))
 
 cov_tx_plot_dat %>% 
   dplyr::select(deid_enc_id, date, COVID_tx) %>%
@@ -620,7 +643,6 @@ cov_tx_plot_dat %>%
 cov_tx_plot_dat %>% 
   dplyr::select(deid_enc_id, COVID_tx) %>%
   mutate(COVID_tx = as.character(COVID_tx)) %>%
-  dplyr::filter(COVID_tx != "No Corticosteroids") %>%
   distinct() %>%
   group_by(COVID_tx) %>%
   dplyr::summarize(n = n())
@@ -645,27 +667,29 @@ table_grob <- tableGrob(table_data, rows = NULL,
 # table_grob <- gtable::gtable_add_grob(table_grob, title, 
 #                                       t = 1, l = 1, r = ncol(table_grob))
 
-pal <- c("grey40", "#4F9300")
+pal = viridis(4, option = "plasma", direction = 1)
 
 p <- ggplot(cov_tx_plot_dat, aes(x = DaysSinceEntry, y = deid_enc_id, 
                                   fill = COVID_tx)) +
   geom_tile() +
   labs(x = "Days Since Entry") +
   theme_minimal() +
-  scale_fill_manual(breaks = c("No Corticosteroids", "Corticosteroids"),
-                    values = c(pal)) +
+  scale_fill_manual(values = pal, breaks = c("No Treatment", 
+                                      "Remdesivir Only", 
+                                      "Corticosteroids Only", 
+                                      "Both")) +
   xlim(0, 21) +
   theme(axis.text.y = element_blank(),
         axis.ticks.y = element_blank(),
         axis.title.y = element_blank(),
-        legend.title = element_blank(),
-        legend.position = "none") +
-  guides(fill = guide_legend(override.aes = list(shape = 15, size = 4, alpha = 1)))
+        legend.title = element_blank()) +
+  guides(fill = guide_legend(override.aes = list(shape = 15, size = 4, alpha = 1))) +
+  labs(tag = "A")
 
 # Combine with patchwork
 cov_tx_dist <- p + inset_element(table_grob, 
-                  left = 0.5, bottom = 0.15, 
-                  right = 0.95, top = 0.45)
+                  left = 0.5, bottom = 0.1, 
+                  right = 0.95, top = 0.5)
 
 cov_tx_dist
 
@@ -693,14 +717,14 @@ cov_tx_mod <- fit_msm_models(
   mc.cores = 1
 )
 
-cov_tx_hr <- tidy_msm_hazards(cov_tx_mod)
+cov_tx_hrs <- tidy_msm_hazards(cov_tx_mod)
 
 # Define plot limits
 x_min <- 0
 x_max <- 3
 
 # Flag which error bars exceed limits and clip them
-cov_tx_hr_plot <- cov_tx_hr %>%
+cov_tx_hr_plot <- cov_tx_hrs %>%
   mutate(
     lower_exceeds = hr_lower < x_min,
     upper_exceeds = hr_upper > x_max,
@@ -711,28 +735,41 @@ cov_tx_hr_plot <- cov_tx_hr %>%
          from = trimws(sub("-.*", "", transition))) %>%
   left_join(trend_types) %>%
   mutate(lower_clip = ifelse(lower_exceeds, TRUE, FALSE),
-         upper_clip = ifelse(upper_exceeds, TRUE, FALSE))
+         upper_clip = ifelse(upper_exceeds, TRUE, FALSE)) %>%
+  mutate(COVID_tx = str_remove(covariate_term, "^COVID_tx")) %>%
+  bind_rows({
+    x <- .[NA, ]
+    x$COVID_tx <- "No Treatment"
+    x$transition <- "M - S"
+    x
+  }) %>%
+  mutate(COVID_tx = factor(COVID_tx, 
+                           levels = c("No Treatment", 
+                                      "Remdesivir Only", 
+                                      "Corticosteroids Only", 
+                                      "Both"),
+                           ordered = FALSE))
 
 # Create position dodge object to share across layers
 pd <- position_dodge(width = 0.5)
 
-cov_tx_hr <- ggplot(cov_tx_hr_plot, aes(y = transition, x = hazard_ratio, color = covariate_term, group = covariate_term)) +
-  geom_point(alpha = 0) +
+cov_tx_hr <- ggplot(cov_tx_hr_plot, aes(y = transition, x = hazard_ratio, color = COVID_tx)) +
+  geom_point(alpha = 0, show.legend = FALSE) +
   geom_pointrange(
-    aes(xmin = hr_lower_clipped, xmax = hr_upper_clipped),
+    aes(xmin = hr_lower_clipped, xmax = hr_upper_clipped,
+        color = COVID_tx),
     position = pd,
-    show.legend = FALSE,
-    color = pal[2]
+    show.legend = FALSE
   ) +
   geom_segment(
     data = cov_tx_hr_plot,
     aes(x = hr_upper_clipped - 0.1,
         xend = hr_upper_clipped,
-        alpha = upper_clip),
+        alpha = upper_clip,
+        color = COVID_tx),
     arrow = arrow(length = unit(0.15, "cm"), type = "closed"),
     position = pd,
-    show.legend = FALSE,
-    color = pal[2]
+    show.legend = FALSE
   ) +
   geom_segment(
     data = cov_tx_hr_plot,
@@ -740,19 +777,30 @@ cov_tx_hr <- ggplot(cov_tx_hr_plot, aes(y = transition, x = hazard_ratio, color 
         yend = transition,
         x = hr_lower_clipped + 0.1,
         xend = hr_lower_clipped,
-        alpha = lower_clip),
+        alpha = lower_clip,
+        color = COVID_tx),
     arrow = arrow(length = unit(0.15, "cm"), type = "closed"),
     position = pd,
-    show.legend = FALSE,
-    color = pal[2]
+    show.legend = FALSE
   ) +
   geom_vline(xintercept = 1, linetype = "dashed") +
   labs(y = "Transition", x = "Hazard Ratio (95% CI)") +
   theme_minimal() +
   xlim(c(x_min, x_max)) +
-  guides(color = "none")
+  scale_color_manual(values = pal, breaks = c("No Treatment", 
+                                      "Remdesivir Only", 
+                                      "Corticosteroids Only", 
+                                      "Both")) +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0), guide = "none") +
+  # guides(color = guide_legend(override.aes = list(shape = 15, size = 4, alpha = 1))) +
+  theme(legend.title = element_blank()) +
+  guides(color = "none") +
+  labs(tag = "B")
 
-cov_tx_combined <- cov_tx_dist + cov_tx_hr + plot_layout(widths = c(2.5, 1))
+cov_tx_combined <- cov_tx_dist + cov_tx_hr + 
+  # plot_annotation(tag_levels = 'A') +
+  plot_layout(widths = c(2.5, 1), guides = "collect") &
+  theme(legend.position = "bottom")
 
 cov_tx_combined
 
